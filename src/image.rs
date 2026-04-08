@@ -1,4 +1,4 @@
-/// Image protocol detection, parsing, and storage for sixel and kitty graphics.
+//! Image protocol detection, parsing, and storage for sixel and kitty graphics.
 
 /// An inline image extracted from the input stream.
 #[derive(Clone, Debug)]
@@ -67,7 +67,8 @@ struct ExtractedImage {
 /// Query the terminal for cell size in pixels.
 /// Tries, in order:
 ///   1. TIOCGWINSZ ioctl (pixel fields, often zero on many terminals)
-///   2. CSI 16 t  — xterm "Report Cell Size" (widely supported by sixel-capable terminals)
+///   2. CSI 16 t  -- xterm "Report Cell Size" (widely supported by sixel-capable terminals)
+///
 /// Returns (cell_width, cell_height) in pixels, or a conservative default.
 pub fn query_cell_size() -> (usize, usize) {
     #[cfg(unix)]
@@ -308,13 +309,13 @@ fn analyze_sixel(data: &[u8], cell_w: usize, cell_h: usize) -> SixelInfo {
 
     if let Some(q_pos) = s.find('q') {
         let after_q = &s[q_pos + 1..];
-        if after_q.starts_with('"') {
+        if let Some(stripped) = after_q.strip_prefix('"') {
             // Parse raster attributes
-            let raster_end = after_q[1..].find(|c: char| {
-                c == '#' || c == '!' || c == '$' || c == '-' || (c >= '?' && c <= '~')
+            let raster_end = stripped.find(|c: char| {
+                c == '#' || c == '!' || c == '$' || c == '-' || ('?'..='~').contains(&c)
             });
             if let Some(end) = raster_end {
-                let raster = &after_q[1..1 + end];
+                let raster = &stripped[..end];
                 let parts: Vec<&str> = raster.split(';').collect();
                 if parts.len() >= 4 {
                     pixel_w = parts[2].parse().unwrap_or(0);
@@ -338,7 +339,13 @@ fn analyze_sixel(data: &[u8], cell_w: usize, cell_h: usize) -> SixelInfo {
 
     // Skip raster attributes if present
     if i < data.len() && data[i] == b'"' {
-        while i < data.len() && data[i] != b'#' && !(data[i] >= b'?' && data[i] <= b'~') && data[i] != b'!' && data[i] != b'-' && data[i] != b'$' {
+        while i < data.len()
+            && data[i] != b'#'
+            && !(data[i] >= b'?' && data[i] <= b'~')
+            && data[i] != b'!'
+            && data[i] != b'-'
+            && data[i] != b'$'
+        {
             i += 1;
         }
     }
@@ -371,7 +378,6 @@ fn analyze_sixel(data: &[u8], cell_w: usize, cell_h: usize) -> SixelInfo {
                 current_width = 0;
                 row_offsets.push(i);
                 rows += 1;
-
             }
             b'$' => {
                 // Graphics Carriage Return
@@ -379,9 +385,8 @@ fn analyze_sixel(data: &[u8], cell_w: usize, cell_h: usize) -> SixelInfo {
                     max_width_pixels = current_width;
                 }
                 current_width = 0;
-
             }
-            b'!'  => {
+            b'!' => {
                 // Repeat introducer: !<count><sixel_char>
                 i += 1;
                 let mut count = 0usize;
@@ -391,13 +396,11 @@ fn analyze_sixel(data: &[u8], cell_w: usize, cell_h: usize) -> SixelInfo {
                 }
                 if i < data.len() && data[i] >= b'?' && data[i] <= b'~' {
                     current_width += count.max(1);
-    
                 }
                 // i now points at the sixel char, will be incremented below
             }
             b'?'..=b'~' => {
                 current_width += 1;
-
             }
             _ => {}
         }
@@ -416,8 +419,8 @@ fn analyze_sixel(data: &[u8], cell_w: usize, cell_h: usize) -> SixelInfo {
         pixel_h = rows * 6;
     }
 
-    let width_cols = (pixel_w + cell_w - 1) / cell_w;
-    let height_rows = (pixel_h + cell_h - 1) / cell_h;
+    let width_cols = pixel_w.div_ceil(cell_w);
+    let height_rows = pixel_h.div_ceil(cell_h);
 
     SixelInfo {
         width_cols: width_cols.max(1),
@@ -461,7 +464,7 @@ pub fn clip_sixel(
     // Each terminal row = cell_h pixels, each sixel row = 6 pixels.
     let skip_sixel_top = (skip_top * cell_h) / 6;
     let keep_pixels = visible_rows * cell_h;
-    let keep_sixel_rows = (keep_pixels + 5) / 6; // round up
+    let keep_sixel_rows = keep_pixels.div_ceil(6);
 
     if skip_sixel_top >= img.sixel_row_count {
         return None;
@@ -508,9 +511,8 @@ pub fn clip_sixel(
     let adjusted_header = adjust_sixel_raster_height(header, new_pixel_h);
 
     let color_defs_size: usize = img.sixel_color_defs.iter().map(|d| d.len()).sum();
-    let mut result = Vec::with_capacity(
-        adjusted_header.len() + color_defs_size + kept_data.len() + 2,
-    );
+    let mut result =
+        Vec::with_capacity(adjusted_header.len() + color_defs_size + kept_data.len() + 2);
     result.extend_from_slice(&adjusted_header);
 
     // Always prepend the full palette so colour references resolve correctly
@@ -552,20 +554,20 @@ fn adjust_sixel_raster_height(header: &[u8], new_pixel_h: usize) -> Vec<u8> {
     let s = String::from_utf8_lossy(header);
     if let Some(q_pos) = s.find('q') {
         let after_q = &s[q_pos + 1..];
-        if after_q.starts_with('"') {
+        if let Some(stripped) = after_q.strip_prefix('"') {
             // Find the end of raster attributes
-            if let Some(raster_end) = after_q[1..].find(|c: char| {
-                c == '#' || c == '!' || c == '$' || c == '-' || (c >= '?' && c <= '~')
+            if let Some(raster_end) = stripped.find(|c: char| {
+                c == '#' || c == '!' || c == '$' || c == '-' || ('?'..='~').contains(&c)
             }) {
-                let raster = &after_q[1..1 + raster_end];
+                let raster = &stripped[..raster_end];
                 let parts: Vec<&str> = raster.split(';').collect();
                 if parts.len() >= 4 {
                     // Rebuild with adjusted Pv
-                    let new_raster = format!("{};{};{};{}",
-                        parts[0], parts[1], parts[2], new_pixel_h);
+                    let new_raster =
+                        format!("{};{};{};{}", parts[0], parts[1], parts[2], new_pixel_h);
                     let prefix = &s[..q_pos + 1]; // up to and including 'q'
-                    let suffix = &s[q_pos + 1 + 1 + raster_end..]; // after raster attrs
-                    let result = format!("{}\"{}{}",  prefix, new_raster, suffix);
+                    let suffix = &stripped[raster_end..]; // after raster attrs
+                    let result = format!("{}\"{}{}", prefix, new_raster, suffix);
                     return result.into_bytes();
                 }
             }
@@ -703,10 +705,10 @@ fn parse_kitty_dimensions(data: &[u8], cell_w: usize, cell_h: usize) -> (usize, 
     }
     if pixel_w > 0 || pixel_h > 0 {
         if cols == 0 && pixel_w > 0 {
-            cols = (pixel_w + cell_w - 1) / cell_w;
+            cols = pixel_w.div_ceil(cell_w);
         }
         if rows == 0 && pixel_h > 0 {
-            rows = (pixel_h + cell_h - 1) / cell_h;
+            rows = pixel_h.div_ceil(cell_h);
         }
     }
     (cols.max(1), rows.max(1))
@@ -800,7 +802,12 @@ pub fn process_input(input: &str, cell_w: usize, cell_h: usize) -> (Vec<String>,
         expanded_lines.push(lr.cleaned);
 
         // Determine how many extra rows are needed for images on this line
-        let max_image_height = lr.images.iter().map(|img| img.height_rows).max().unwrap_or(0);
+        let max_image_height = lr
+            .images
+            .iter()
+            .map(|img| img.height_rows)
+            .max()
+            .unwrap_or(0);
 
         for img in lr.images {
             all_images.push(InlineImage {

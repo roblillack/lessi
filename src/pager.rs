@@ -1373,7 +1373,14 @@ fn render_pager(
                 focused: state.focused_link(),
                 hovered: state.hovered_link(),
             };
-            render_line(stdout, line, line_idx, &highlights, content_width, link_context)?;
+            render_line(
+                stdout,
+                line,
+                line_idx,
+                &highlights,
+                content_width,
+                link_context,
+            )?;
         }
     }
 
@@ -1403,7 +1410,13 @@ fn render_pager(
     stdout.flush()?;
 
     // Render visible images
-    render_images(stdout, images, state.scroll_offset, state.viewport_height, state.cell_h)?;
+    render_images(
+        stdout,
+        images,
+        state.scroll_offset,
+        state.viewport_height,
+        state.cell_h,
+    )?;
 
     stdout.flush()
 }
@@ -1421,11 +1434,7 @@ fn render_images(
         // How many terminal rows are clipped from the top?
         let skip_top = scroll_offset.saturating_sub(img.line_idx);
         // Where does the image start in the viewport?
-        let viewport_row = if img.line_idx >= scroll_offset {
-            img.line_idx - scroll_offset
-        } else {
-            0
-        };
+        let viewport_row = img.line_idx.saturating_sub(scroll_offset);
         // How many rows remain between viewport_row and the status line?
         let available = viewport_height.saturating_sub(viewport_row);
         if available == 0 {
@@ -1596,11 +1605,7 @@ fn draw_scrollbar(
         }
     }
 
-    queue!(
-        stdout,
-        MoveTo(column, viewport_height as u16),
-        Print(" ")
-    )?;
+    queue!(stdout, MoveTo(column, viewport_height as u16), Print(" "))?;
     Ok(())
 }
 
@@ -1628,10 +1633,7 @@ fn draw_status_line(
         }
         SearchMode::Normal => {
             let position_text = format_position(state);
-            let name = state
-                .filename
-                .as_deref()
-                .unwrap_or("lessi");
+            let name = state.filename.as_deref().unwrap_or("lessi");
             format!(
                 "{} {} -- q: quit, j/k/↑/↓: scroll, d/u: half-page, /: search",
                 position_text, name,
