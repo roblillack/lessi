@@ -18,7 +18,7 @@ use std::io::{self, Stdout, Write};
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
 
-use crate::image::{clip_sixel_top, visible_images, ImageProtocol, InlineImage};
+use crate::image::{clip_sixel, visible_images, ImageProtocol, InlineImage};
 
 // ---------------------------------------------------------------------------
 // ANSI parsing types
@@ -1418,34 +1418,45 @@ fn render_images(
 ) -> io::Result<()> {
     let vis = visible_images(images, scroll_offset, viewport_height);
     for img in vis {
-        if img.line_idx >= scroll_offset {
-            // Image starts within or below the viewport top
-            let viewport_row = img.line_idx - scroll_offset;
-            if viewport_row >= viewport_height {
-                continue;
-            }
-            queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
-            stdout.flush()?;
-            stdout.write_all(&img.data)?;
+        // How many terminal rows are clipped from the top?
+        let skip_top = scroll_offset.saturating_sub(img.line_idx);
+        // Where does the image start in the viewport?
+        let viewport_row = if img.line_idx >= scroll_offset {
+            img.line_idx - scroll_offset
         } else {
-            // Image starts above the viewport -- need to clip from the top
-            let skip_rows = scroll_offset - img.line_idx;
-            match img.protocol {
-                ImageProtocol::Sixel => {
-                    if let Some(clipped) = clip_sixel_top(img, skip_rows, cell_h) {
-                        queue!(stdout, MoveTo(img.col as u16, 0))?;
+            0
+        };
+        // How many rows remain between viewport_row and the status line?
+        let available = viewport_height.saturating_sub(viewport_row);
+        if available == 0 {
+            continue;
+        }
+
+        let needs_clip = skip_top > 0 || img.height_rows > available;
+
+        match img.protocol {
+            ImageProtocol::Sixel => {
+                if needs_clip {
+                    if let Some(clipped) = clip_sixel(img, skip_top, available, cell_h) {
+                        queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
                         stdout.flush()?;
                         stdout.write_all(&clipped)?;
                     }
-                }
-                ImageProtocol::Kitty => {
-                    // Kitty protocol doesn't support easy top-clipping without
-                    // re-encoding; skip partially visible kitty images for now.
-                    // (A full implementation would use virtual placements.)
+                } else {
+                    queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
+                    stdout.flush()?;
+                    stdout.write_all(&img.data)?;
                 }
             }
+            ImageProtocol::Kitty => {
+                if !needs_clip {
+                    queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
+                    stdout.flush()?;
+                    stdout.write_all(&img.data)?;
+                }
+                // Kitty clipping would require re-encoding; skip partial images.
+            }
         }
-        // Reset attributes after image output
         queue!(stdout, SetAttribute(Attribute::Reset), ResetColor)?;
     }
 

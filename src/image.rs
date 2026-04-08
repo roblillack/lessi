@@ -64,45 +64,142 @@ struct ExtractedImage {
 // Terminal cell size detection
 // ---------------------------------------------------------------------------
 
-/// Query the terminal for pixel dimensions via TIOCGWINSZ and derive cell size.
+/// Query the terminal for cell size in pixels.
+/// Tries, in order:
+///   1. TIOCGWINSZ ioctl (pixel fields, often zero on many terminals)
+///   2. CSI 16 t  — xterm "Report Cell Size" (widely supported by sixel-capable terminals)
 /// Returns (cell_width, cell_height) in pixels, or a conservative default.
 pub fn query_cell_size() -> (usize, usize) {
     #[cfg(unix)]
     {
-        use std::mem::MaybeUninit;
-        // TIOCGWINSZ returns: rows, cols, xpixel, ypixel (each u16)
-        let mut ws = MaybeUninit::<[u16; 4]>::uninit();
-        let fd = 1; // stdout
-        let ret = unsafe {
-            libc::ioctl(fd, libc::TIOCGWINSZ, ws.as_mut_ptr())
-        };
-        if ret == 0 {
-            let ws = unsafe { ws.assume_init() };
-            let rows = ws[0] as usize;
-            let cols = ws[1] as usize;
-            let xpix = ws[2] as usize;
-            let ypix = ws[3] as usize;
-            if xpix > 0 && ypix > 0 && rows > 0 && cols > 0 {
-                return (xpix / cols, ypix / rows);
-            }
+        // --- Approach 1: TIOCGWINSZ ---
+        if let Some(size) = query_cell_size_ioctl() {
+            return size;
         }
-        // Try stderr as fallback (stdout might be redirected)
-        let ret = unsafe {
-            libc::ioctl(2, libc::TIOCGWINSZ, ws.as_mut_ptr())
-        };
-        if ret == 0 {
-            let ws = unsafe { ws.assume_init() };
-            let rows = ws[0] as usize;
-            let cols = ws[1] as usize;
-            let xpix = ws[2] as usize;
-            let ypix = ws[3] as usize;
-            if xpix > 0 && ypix > 0 && rows > 0 && cols > 0 {
-                return (xpix / cols, ypix / rows);
-            }
+        // --- Approach 2: CSI 16 t escape sequence ---
+        if let Some(size) = query_cell_size_escape() {
+            return size;
         }
     }
     // Conservative fallback
     (8, 16)
+}
+
+#[cfg(unix)]
+fn query_cell_size_ioctl() -> Option<(usize, usize)> {
+    use std::mem::MaybeUninit;
+    for fd in [1i32, 2, 0] {
+        let mut ws = MaybeUninit::<[u16; 4]>::uninit();
+        let ret = unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, ws.as_mut_ptr()) };
+        if ret == 0 {
+            let ws = unsafe { ws.assume_init() };
+            let rows = ws[0] as usize;
+            let cols = ws[1] as usize;
+            let xpix = ws[2] as usize;
+            let ypix = ws[3] as usize;
+            if xpix > 0 && ypix > 0 && rows > 0 && cols > 0 {
+                return Some((xpix / cols, ypix / rows));
+            }
+        }
+    }
+    None
+}
+
+/// Query cell size via the CSI 16 t escape sequence.
+/// Sends the query to the terminal and reads the response.
+/// Response format: ESC [ 6 ; cell_h ; cell_w t
+#[cfg(unix)]
+fn query_cell_size_escape() -> Option<(usize, usize)> {
+    use std::io::{Read, Write};
+
+    // We need a tty fd for both writing the query and reading the response.
+    // Open /dev/tty directly to avoid issues with redirected stdin/stdout.
+    let mut tty = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+    {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+
+    let tty_fd = {
+        use std::os::unix::io::AsRawFd;
+        tty.as_raw_fd()
+    };
+
+    // Save terminal state and switch to raw mode
+    let mut old_termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    if unsafe { libc::tcgetattr(tty_fd, old_termios.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    let old_termios = unsafe { old_termios.assume_init() };
+    let mut raw = old_termios;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+    raw.c_cc[libc::VMIN] = 0;
+    raw.c_cc[libc::VTIME] = 1; // 100ms timeout
+    if unsafe { libc::tcsetattr(tty_fd, libc::TCSANOW, &raw) } != 0 {
+        return None;
+    }
+
+    // Flush any pending input
+    let _ = unsafe { libc::tcflush(tty_fd, libc::TCIFLUSH) };
+
+    // Send CSI 16 t
+    let wrote = tty.write(b"\x1b[16t").ok();
+    let _ = tty.flush();
+
+    let result = if wrote.is_some() {
+        // Read response: ESC [ 6 ; Ps1 ; Ps2 t
+        let mut buf = [0u8; 64];
+        let mut total = 0usize;
+        // Read with timeout (VTIME handles this)
+        for _ in 0..10 {
+            match tty.read(&mut buf[total..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    // Check if we got the 't' terminator
+                    if buf[..total].contains(&b't') {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        parse_cell_size_response(&buf[..total])
+    } else {
+        None
+    };
+
+    // Restore terminal state
+    unsafe { libc::tcsetattr(tty_fd, libc::TCSANOW, &old_termios) };
+
+    result
+}
+
+/// Parse a CSI 16 t response: ESC [ 6 ; cell_h ; cell_w t
+#[cfg(unix)]
+fn parse_cell_size_response(buf: &[u8]) -> Option<(usize, usize)> {
+    // Find the sequence starting with ESC [
+    let esc_pos = buf.iter().position(|&b| b == 0x1b)?;
+    if esc_pos + 1 >= buf.len() || buf[esc_pos + 1] != b'[' {
+        return None;
+    }
+    let after_csi = &buf[esc_pos + 2..];
+    // Find the 't' terminator
+    let t_pos = after_csi.iter().position(|&b| b == b't')?;
+    let params_str = std::str::from_utf8(&after_csi[..t_pos]).ok()?;
+    let parts: Vec<&str> = params_str.split(';').collect();
+    // Expected: "6;cell_h;cell_w"
+    if parts.len() >= 3 && parts[0] == "6" {
+        let cell_h = parts[1].parse::<usize>().ok()?;
+        let cell_w = parts[2].parse::<usize>().ok()?;
+        if cell_h > 0 && cell_w > 0 {
+            return Some((cell_w, cell_h));
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -336,68 +433,93 @@ fn analyze_sixel(data: &[u8], cell_w: usize, cell_h: usize) -> SixelInfo {
 // Sixel clipping
 // ---------------------------------------------------------------------------
 
-/// Build a clipped sixel sequence that skips the first `skip_rows` terminal rows.
-/// Returns None if the entire image would be clipped.
-pub fn clip_sixel_top(img: &InlineImage, skip_terminal_rows: usize, cell_h: usize) -> Option<Vec<u8>> {
-    if skip_terminal_rows == 0 {
+/// Build a clipped sixel sequence that keeps only the sixel rows corresponding
+/// to terminal rows `skip_top .. (height_rows - skip_bottom)`.
+///
+/// `skip_top`  — number of terminal rows to remove from the top  (0 = keep top)
+/// `keep_rows` — maximum number of terminal rows to keep         (0 = nothing)
+///
+/// Returns `None` if nothing remains after clipping.
+pub fn clip_sixel(
+    img: &InlineImage,
+    skip_top: usize,
+    keep_rows: usize,
+    cell_h: usize,
+) -> Option<Vec<u8>> {
+    if keep_rows == 0 || skip_top >= img.height_rows {
+        return None;
+    }
+
+    let visible_rows = keep_rows.min(img.height_rows - skip_top);
+
+    // Fast path: no clipping needed at all
+    if skip_top == 0 && visible_rows >= img.height_rows {
         return Some(img.data.clone());
     }
-    if skip_terminal_rows >= img.height_rows {
-        return None;
-    }
 
-    // Calculate how many sixel rows to skip.
+    // --- Convert terminal rows → sixel rows --------------------------------
     // Each terminal row = cell_h pixels, each sixel row = 6 pixels.
-    let skip_pixels = skip_terminal_rows * cell_h;
-    let skip_sixel_rows = skip_pixels / 6;
+    let skip_sixel_top = (skip_top * cell_h) / 6;
+    let keep_pixels = visible_rows * cell_h;
+    let keep_sixel_rows = (keep_pixels + 5) / 6; // round up
 
-    if skip_sixel_rows >= img.sixel_row_count {
+    if skip_sixel_top >= img.sixel_row_count {
         return None;
     }
 
-    // We need to reconstruct:
-    //   ESC P <params> q <raster_attrs_adjusted> <color_defs> <remaining_sixel_rows> ESC \
-    //
-    // Strategy: keep the header (everything before sixel_data_start),
-    // then skip the first skip_sixel_rows worth of data (up to the Nth '-'),
-    // then emit the rest.
+    let end_sixel_row = (skip_sixel_top + keep_sixel_rows).min(img.sixel_row_count);
+    if end_sixel_row <= skip_sixel_top {
+        return None;
+    }
 
-    let header = &img.data[..img.sixel_data_start];
-
-    // Find the byte position right after the skip_sixel_rows-th '-' separator
-    let data_start_after_skip = if skip_sixel_rows == 0 {
+    // --- Determine byte range of the rows we want to keep ------------------
+    // Start: right after the '-' that ends (skip_sixel_top - 1), or data_start.
+    let data_start = if skip_sixel_top == 0 {
         img.sixel_data_start
-    } else if skip_sixel_rows <= img.sixel_row_offsets.len() {
-        // sixel_row_offsets[i] is the position of the '-' ending row i.
-        // We want to start right after the '-' that ends row (skip_sixel_rows - 1).
-        img.sixel_row_offsets[skip_sixel_rows - 1] + 1
+    } else if skip_sixel_top <= img.sixel_row_offsets.len() {
+        img.sixel_row_offsets[skip_sixel_top - 1] + 1
     } else {
         return None;
     };
 
-    // Find the ST terminator position
+    // End: at the '-' that ends (end_sixel_row - 1), or before ST.
     let st_start = find_st_position(&img.data)?;
+    let data_end = if end_sixel_row >= img.sixel_row_count {
+        // Keep through the last row (up to ST)
+        st_start
+    } else if end_sixel_row <= img.sixel_row_offsets.len() {
+        // Include up to (but not including) the '-' that ends row end_sixel_row-1,
+        // but we actually want to include that row's data.  The offset points at the
+        // '-' itself; we want everything up to and including the data before it.
+        img.sixel_row_offsets[end_sixel_row - 1]
+    } else {
+        st_start
+    };
 
-    let remaining_data = &img.data[data_start_after_skip..st_start];
+    if data_start >= data_end {
+        return None;
+    }
 
-    // Adjust raster attributes if present to reflect new pixel height
-    let remaining_pixel_h = img.height_rows.saturating_sub(skip_terminal_rows) * cell_h;
-    let adjusted_header = adjust_sixel_raster_height(header, remaining_pixel_h);
+    let kept_data = &img.data[data_start..data_end];
 
-    // Calculate total size for pre-allocation
+    // --- Rebuild the sequence -----------------------------------------------
+    let header = &img.data[..img.sixel_data_start];
+    let new_pixel_h = visible_rows * cell_h;
+    let adjusted_header = adjust_sixel_raster_height(header, new_pixel_h);
+
     let color_defs_size: usize = img.sixel_color_defs.iter().map(|d| d.len()).sum();
     let mut result = Vec::with_capacity(
-        adjusted_header.len() + color_defs_size + remaining_data.len() + 2,
+        adjusted_header.len() + color_defs_size + kept_data.len() + 2,
     );
     result.extend_from_slice(&adjusted_header);
 
-    // Prepend ALL color definitions so the palette is fully defined
-    // before the remaining sixel data references colors by index.
+    // Always prepend the full palette so colour references resolve correctly
+    // even when the defining rows have been clipped away.
     for def in &img.sixel_color_defs {
         result.extend_from_slice(def);
     }
 
-    result.extend_from_slice(remaining_data);
+    result.extend_from_slice(kept_data);
     // Append ST (ESC \)
     result.push(0x1b);
     result.push(b'\\');
