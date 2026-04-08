@@ -1,0 +1,15 @@
+[package]
+name = "lessi"
+version = "0.1.0"
+edition = "2021"
+description = "A terminal pager with integrated sixel/kitty graphics support"
+
+[[bin]]
+name = "lessi"
+path = "src/main.rs"
+
+[dependencies]
+crossterm = "0.27"
+unicode-width = "0.1"
+clap = { version = "4.4", features = ["derive"] }
+libc = "0.2"
