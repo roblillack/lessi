@@ -1,5 +1,9 @@
 # lessi
 
+[![Build Status](https://github.com/roblillack/lessi/workflows/build-lint-test/badge.svg)](https://github.com/roblillack/lessi/actions)
+[![Crates.io](https://img.shields.io/crates/v/lessi.svg)](https://crates.io/crates/lessi)
+[![Downloads](https://img.shields.io/crates/d/lessi.svg)](https://crates.io/crates/lessi)
+
 A terminal pager with integrated sixel and kitty graphics protocol support. Think `less`, but with inline images.
 
 ## Features
@@ -15,10 +19,10 @@ A terminal pager with integrated sixel and kitty graphics protocol support. Thin
 ## Installation
 
 ```
-cargo install --path .
+cargo install lessi
 ```
 
-Or build manually:
+Or build from source:
 
 ```
 cargo build --release
