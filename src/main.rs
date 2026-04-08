@@ -64,14 +64,19 @@ fn main() {
             std::process::exit(1);
         }
     } else {
-        // Output directly without paging
-        for line in &cleaned_lines {
+        // Output directly without paging.
+        // Emit images inline at their correct line positions so the
+        // terminal renders them where the spacer lines reserve space.
+        let mut img_idx = 0;
+        let mut stdout = io::stdout();
+        for (line_idx, line) in cleaned_lines.iter().enumerate() {
             println!("{}", line);
-        }
-        // Also emit images inline (when outputting to terminal without paging)
-        if is_tty {
-            for img in &images {
-                io::Write::write_all(&mut io::stdout(), &img.data).ok();
+            // Emit any images that start on this line
+            while img_idx < images.len() && images[img_idx].line_idx == line_idx {
+                if is_tty {
+                    io::Write::write_all(&mut stdout, &images[img_idx].data).ok();
+                }
+                img_idx += 1;
             }
         }
     }
