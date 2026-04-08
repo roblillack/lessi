@@ -3,6 +3,12 @@ name = "lessi"
 version = "0.1.0"
 edition = "2021"
 description = "A terminal pager with integrated sixel/kitty graphics support"
+authors = ["Rob Lillack <rob@lillack.net>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/roblillack/lessi"
+repository = "https://github.com/roblillack/lessi"
+documentation = "https://docs.rs/lessi"
 
 [[bin]]
 name = "lessi"
