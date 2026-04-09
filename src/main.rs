@@ -80,13 +80,8 @@ fn main() {
     let parsed_lines = pager::parse_content_to_lines(&cleaned_lines);
 
     let is_tty = io::stdout().is_terminal();
-    let should_page = if !is_tty {
-        false
-    } else if quit_if_one_screen && pager::fits_in_viewport(parsed_lines.len()) {
-        false
-    } else {
-        true
-    };
+    let should_page =
+        is_tty && !(quit_if_one_screen && pager::fits_in_viewport(parsed_lines.len()));
 
     if should_page {
         let filename = args.file.clone();
