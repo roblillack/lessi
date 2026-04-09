@@ -15,7 +15,7 @@ name = "lessi"
 path = "src/main.rs"
 
 [dependencies]
-crossterm = "0.27"
+crossterm = { version = "0.27", features = ["use-dev-tty"] }
 unicode-width = "0.1"
 clap = { version = "4.4", features = ["derive"] }
 libc = "0.2"
