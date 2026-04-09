@@ -8,6 +8,7 @@ A terminal pager with integrated sixel and kitty graphics protocol support. Thin
 
 ## Features
 
+- **Full ANSI support** -- colors, text attributes (bold, italic, underline, etc.), and escape sequences are parsed and rendered faithfully
 - **Full pager navigation** -- scroll line-by-line (j/k, arrow keys), half-page (d/u, Ctrl-D/U), full page (Space/b, PgUp/PgDn), jump to start/end (g/G, Home/End)
 - **Mouse support** -- scroll wheel, click-and-drag content, draggable scrollbar
 - **Search** -- `/` to search, `n`/`N` for next/prev match, Esc to clear; current match highlighted in yellow, others in cyan
@@ -15,6 +16,7 @@ A terminal pager with integrated sixel and kitty graphics protocol support. Thin
 - **Sixel graphics** -- inline sixel images are extracted from the input stream and rendered at their correct positions as you scroll
 - **Kitty graphics protocol** -- kitty image sequences (including multi-chunk transfers) are detected, positioned, and rendered within the pager viewport
 - **Scrollbar** -- proportional knob that tracks position; click or drag to jump
+- **`less`-compatible flags** -- supports `-F`, `-R`, `-X` and reads defaults from the `LESS` environment variable
 
 ## Installation
 
@@ -39,11 +41,23 @@ lessi document.txt
 cat colored-output.txt | lessi
 some-command | lessi
 
-# Force paging even if content fits the terminal
+# Quit automatically if content fits on one screen (like less -F)
 lessi -F short-file.txt
+
+# Don't use alternate screen (leave content visible after exit)
+lessi -X document.txt
 
 # Page content with embedded images (e.g. from timg, chafa, or similar)
 timg -p sixel image.png | lessi
+```
+
+### Use as Git pager
+
+lessi reads the `LESS` environment variable, so it works as a drop-in
+replacement for `less` with Git (which sets `LESS=FRX` by default):
+
+```
+git config --global core.pager lessi
 ```
 
 ## Key bindings

@@ -14,13 +14,44 @@ struct Args {
     /// File to display. Reads from stdin if not provided.
     file: Option<String>,
 
-    /// Force paging even if content fits in terminal.
-    #[arg(short = 'F', long = "force")]
-    force: bool,
+    /// Quit if entire file fits on one screen.
+    #[arg(short = 'F', long = "quit-if-one-screen")]
+    quit_if_one_screen: bool,
+
+    /// Output raw control characters (always enabled, accepted for compatibility).
+    #[arg(short = 'R', long = "RAW-CONTROL-CHARS")]
+    _raw_control_chars: bool,
+
+    /// Don't use alternate screen (leave content on screen after exit).
+    #[arg(short = 'X', long = "no-init")]
+    no_init: bool,
+}
+
+/// Parse single-character flags from the LESS environment variable.
+/// Returns (quit_if_one_screen, no_init).
+fn parse_less_env() -> (bool, bool) {
+    let val = match std::env::var("LESS") {
+        Ok(v) => v,
+        Err(_) => return (false, false),
+    };
+    let mut quit_if_one_screen = false;
+    let mut no_init = false;
+    for ch in val.chars() {
+        match ch {
+            'F' => quit_if_one_screen = true,
+            'X' => no_init = true,
+            'R' | 'r' => {} // accepted, always on
+            _ => {}         // ignore unknown flags
+        }
+    }
+    (quit_if_one_screen, no_init)
 }
 
 fn main() {
     let args = Args::parse();
+    let (env_quit, env_no_init) = parse_less_env();
+    let quit_if_one_screen = args.quit_if_one_screen || env_quit;
+    let no_init = args.no_init || env_no_init;
 
     let input = match &args.file {
         Some(path) => match std::fs::read_to_string(path) {
@@ -51,15 +82,15 @@ fn main() {
     let is_tty = io::stdout().is_terminal();
     let should_page = if !is_tty {
         false
-    } else if args.force {
-        true
+    } else if quit_if_one_screen && pager::fits_in_viewport(parsed_lines.len()) {
+        false
     } else {
-        !pager::fits_in_viewport(parsed_lines.len())
+        true
     };
 
     if should_page {
         let filename = args.file.clone();
-        if let Err(err) = pager::run_pager(parsed_lines, images, filename, cell_h) {
+        if let Err(err) = pager::run_pager(parsed_lines, images, filename, cell_h, no_init) {
             eprintln!("lessi: pager error: {}", err);
             std::process::exit(1);
         }

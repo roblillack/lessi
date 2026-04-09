@@ -2016,10 +2016,14 @@ pub fn run_pager(
     images: Vec<InlineImage>,
     filename: Option<String>,
     cell_h: usize,
+    no_init: bool,
 ) -> io::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, Hide)?;
+    if !no_init {
+        execute!(stdout, EnterAlternateScreen)?;
+    }
+    execute!(stdout, Hide)?;
     execute!(stdout, EnableMouseCapture)?;
     execute!(stdout, Clear(ClearType::All), MoveTo(0, 0))?;
 
@@ -2106,7 +2110,11 @@ pub fn run_pager(
     }
 
     execute!(stdout, DisableMouseCapture)?;
-    execute!(stdout, Show, LeaveAlternateScreen)?;
+    if !no_init {
+        execute!(stdout, Show, LeaveAlternateScreen)?;
+    } else {
+        execute!(stdout, Show)?;
+    }
     disable_raw_mode()?;
 
     result
