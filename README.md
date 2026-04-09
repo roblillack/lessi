@@ -60,6 +60,17 @@ replacement for `less` with Git (which sets `LESS=FRX` by default):
 git config --global core.pager lessi
 ```
 
+### Image diffs with Git
+
+lessi is the perfect companion pager for [imgap](https://github.com/roblillack/imgap), a Git diff driver that renders image diffs as sixel graphics. Together, they let you run `git diff` and see image changes right in your terminal:
+
+```
+git config --global core.pager lessi
+git config --global diff.imgap.command imgap
+echo '*.png diff=imgap' >> .gitattributes
+git diff   # image diffs are now displayed inline
+```
+
 ## Key bindings
 
 | Key | Action |
