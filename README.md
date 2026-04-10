@@ -6,6 +6,8 @@
 
 A terminal pager with integrated sixel and kitty graphics protocol support. Think `less`, but with inline images.
 
+![lessi demo](demo.gif)
+
 ## Features
 
 - **Full ANSI support** -- colors, text attributes (bold, italic, underline, etc.), and escape sequences are parsed and rendered faithfully
@@ -73,23 +75,23 @@ git diff   # image diffs are now displayed inline
 
 ## Key bindings
 
-| Key | Action |
-|-----|--------|
-| q, Esc, Ctrl-C | Quit |
-| j, Down | Scroll down one line |
-| k, Up | Scroll up one line |
-| d, Ctrl-D | Scroll down half page |
-| u, Ctrl-U | Scroll up half page |
+| Key                    | Action                |
+| ---------------------- | --------------------- |
+| q, Esc, Ctrl-C         | Quit                  |
+| j, Down                | Scroll down one line  |
+| k, Up                  | Scroll up one line    |
+| d, Ctrl-D              | Scroll down half page |
+| u, Ctrl-U              | Scroll up half page   |
 | Space, f, PgDn, Ctrl-F | Scroll down full page |
-| b, PgUp, Ctrl-B | Scroll up full page |
-| g, Home | Jump to start |
-| G, End | Jump to end |
-| / | Start search |
-| n | Next search match |
-| N | Previous search match |
-| Tab | Focus next link |
-| Shift-Tab | Focus previous link |
-| Enter | Open focused link |
+| b, PgUp, Ctrl-B        | Scroll up full page   |
+| g, Home                | Jump to start         |
+| G, End                 | Jump to end           |
+| /                      | Start search          |
+| n                      | Next search match     |
+| N                      | Previous search match |
+| Tab                    | Focus next link       |
+| Shift-Tab              | Focus previous link   |
+| Enter                  | Open focused link     |
 
 ## How image support works
 
@@ -98,6 +100,7 @@ When lessi reads input, it scans for sixel (`ESC P ... ESC \`) and kitty graphic
 When an image is partially scrolled off the top of the viewport, lessi reconstructs a clipped sixel sequence that skips the appropriate number of sixel rows, so you always see the visible portion of the image rather than nothing at all.
 
 Image dimensions are calculated from:
+
 - **Sixel**: raster attributes (`"Pan;Pad;Ph;Pv`) or sixel row/column counting
 - **Kitty**: `c`/`r` (cell columns/rows) or `s`/`v` (pixel width/height) parameters
 - **Cell size**: queried from the terminal via `TIOCGWINSZ` (falls back to 8x16 if unavailable)
