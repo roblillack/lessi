@@ -2113,7 +2113,13 @@ pub fn run_pager(
     if !no_init {
         execute!(stdout, Show, LeaveAlternateScreen)?;
     } else {
-        execute!(stdout, Show)?;
+        let status_row = state.viewport_height as u16;
+        execute!(
+            stdout,
+            MoveTo(0, status_row),
+            Clear(ClearType::CurrentLine),
+            Show
+        )?;
     }
     disable_raw_mode()?;
 
