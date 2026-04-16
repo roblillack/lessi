@@ -555,21 +555,23 @@ fn adjust_sixel_raster_height(header: &[u8], new_pixel_h: usize) -> Vec<u8> {
     if let Some(q_pos) = s.find('q') {
         let after_q = &s[q_pos + 1..];
         if let Some(stripped) = after_q.strip_prefix('"') {
-            // Find the end of raster attributes
-            if let Some(raster_end) = stripped.find(|c: char| {
-                c == '#' || c == '!' || c == '$' || c == '-' || ('?'..='~').contains(&c)
-            }) {
-                let raster = &stripped[..raster_end];
-                let parts: Vec<&str> = raster.split(';').collect();
-                if parts.len() >= 4 {
-                    // Rebuild with adjusted Pv
-                    let new_raster =
-                        format!("{};{};{};{}", parts[0], parts[1], parts[2], new_pixel_h);
-                    let prefix = &s[..q_pos + 1]; // up to and including 'q'
-                    let suffix = &stripped[raster_end..]; // after raster attrs
-                    let result = format!("{}\"{}{}", prefix, new_raster, suffix);
-                    return result.into_bytes();
-                }
+            // Find the end of raster attributes — they may extend to the
+            // end of the header when it was sliced right before the first
+            // color definition or data byte.
+            let raster_end = stripped
+                .find(|c: char| {
+                    c == '#' || c == '!' || c == '$' || c == '-' || ('?'..='~').contains(&c)
+                })
+                .unwrap_or(stripped.len());
+            let raster = &stripped[..raster_end];
+            let parts: Vec<&str> = raster.split(';').collect();
+            if parts.len() >= 4 {
+                // Rebuild with adjusted Pv
+                let new_raster = format!("{};{};{};{}", parts[0], parts[1], parts[2], new_pixel_h);
+                let prefix = &s[..q_pos + 1]; // up to and including 'q'
+                let suffix = &stripped[raster_end..]; // after raster attrs
+                let result = format!("{}\"{}{}", prefix, new_raster, suffix);
+                return result.into_bytes();
             }
         }
     }
