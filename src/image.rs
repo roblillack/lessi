@@ -850,3 +850,291 @@ pub fn visible_images(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insta::assert_snapshot;
+
+    const CELL_W: usize = 8;
+    const CELL_H: usize = 16;
+
+    fn load_sixel_fixture() -> String {
+        std::fs::read_to_string("tests/fixtures/autobahn.sixel").unwrap()
+    }
+
+    /// Compare `data` against a stored binary reference file.
+    /// When `UPDATE_SNAPSHOTS=1` is set (or the file doesn't exist yet),
+    /// writes the data and lets the test pass so all snapshots can be
+    /// generated in one run.
+    fn assert_binary_snapshot(name: &str, data: &[u8]) {
+        let path = format!("tests/fixtures/{}", name);
+        let update = std::env::var("UPDATE_SNAPSHOTS").map_or(false, |v| v == "1");
+
+        if update || !std::path::Path::new(&path).exists() {
+            std::fs::write(&path, data).unwrap();
+            if !update {
+                panic!(
+                    "New binary snapshot written to {path}. \
+                     Review it, then re-run the tests. \
+                     To regenerate all snapshots at once: \
+                     UPDATE_SNAPSHOTS=1 cargo test"
+                );
+            }
+            return;
+        }
+        let expected = std::fs::read(&path).unwrap();
+        if data != expected.as_slice() {
+            panic!(
+                "Binary snapshot mismatch for {path} \
+                 (got {} bytes, expected {} bytes). \
+                 To update: UPDATE_SNAPSHOTS=1 cargo test",
+                data.len(),
+                expected.len(),
+            );
+        }
+    }
+
+    /// Summarize an InlineImage for snapshotting (excluding raw data bytes).
+    fn summarize_image(img: &InlineImage) -> String {
+        format!(
+            "line_idx: {}\n\
+             col: {}\n\
+             height_rows: {}\n\
+             width_cols: {}\n\
+             protocol: {:?}\n\
+             sixel_row_count: {}\n\
+             sixel_data_start: {}\n\
+             sixel_row_offsets_count: {}\n\
+             sixel_color_defs_count: {}\n\
+             data_length: {}",
+            img.line_idx,
+            img.col,
+            img.height_rows,
+            img.width_cols,
+            img.protocol,
+            img.sixel_row_count,
+            img.sixel_data_start,
+            img.sixel_row_offsets.len(),
+            img.sixel_color_defs.len(),
+            img.data.len(),
+        )
+    }
+
+    #[test]
+    fn sixel_image_processing() {
+        let input = load_sixel_fixture();
+        let (lines, images) = process_input(&input, CELL_W, CELL_H);
+
+        let mut summary = format!(
+            "expanded_lines: {}\nimages: {}\n",
+            lines.len(),
+            images.len()
+        );
+        for (i, img) in images.iter().enumerate() {
+            summary.push_str(&format!(
+                "\n--- Image {} ---\n{}\n",
+                i,
+                summarize_image(img)
+            ));
+        }
+
+        assert_snapshot!(summary);
+    }
+
+    #[test]
+    fn sixel_no_clip_needed() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let result = clip_sixel(img, 0, img.height_rows + 10, CELL_H);
+        let clipped = result.expect("should return Some (fast path: clone)");
+
+        assert_eq!(
+            clipped.len(),
+            img.data.len(),
+            "unclipped should match original size"
+        );
+        assert_eq!(clipped, img.data, "unclipped data should be identical");
+    }
+
+    #[test]
+    fn sixel_clip_top_half_scrolled_off() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let skip_top = img.height_rows / 2;
+        let keep_rows = img.height_rows;
+
+        let clipped = clip_sixel(img, skip_top, keep_rows, CELL_H)
+            .expect("clip should return Some for partial visibility");
+
+        assert_binary_snapshot("autobahn-clip-top-half.sixel", &clipped);
+    }
+
+    #[test]
+    fn sixel_clip_bottom_cropped() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let clipped = clip_sixel(img, 0, img.height_rows / 2, CELL_H)
+            .expect("clip should return Some for bottom crop");
+
+        assert_binary_snapshot("autobahn-clip-bottom-half.sixel", &clipped);
+    }
+
+    #[test]
+    fn sixel_clip_middle_visible() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let clipped = clip_sixel(img, img.height_rows / 4, img.height_rows / 2, CELL_H)
+            .expect("clip should return Some for middle visibility");
+
+        assert_binary_snapshot("autobahn-clip-middle.sixel", &clipped);
+    }
+
+    #[test]
+    fn sixel_clip_single_row_visible() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let clipped = clip_sixel(img, img.height_rows - 1, 1, CELL_H)
+            .expect("clip should return Some for single row");
+
+        assert_binary_snapshot("autobahn-clip-single-row.sixel", &clipped);
+    }
+
+    #[test]
+    fn sixel_fully_scrolled_past() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let result = clip_sixel(img, img.height_rows, 10, CELL_H);
+        assert!(
+            result.is_none(),
+            "should return None when fully scrolled past"
+        );
+
+        let result2 = clip_sixel(img, img.height_rows + 100, 10, CELL_H);
+        assert!(result2.is_none(), "should return None when far past");
+    }
+
+    #[test]
+    fn sixel_clip_zero_keep_rows() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let result = clip_sixel(img, 0, 0, CELL_H);
+        assert!(result.is_none(), "should return None with keep_rows=0");
+    }
+
+    #[test]
+    fn visible_images_at_various_offsets() {
+        let input = load_sixel_fixture();
+        let (lines, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+        let viewport_height = 24;
+
+        let offsets = [
+            0,
+            img.height_rows / 4,
+            img.height_rows / 2,
+            img.height_rows.saturating_sub(1),
+            img.height_rows,
+            img.height_rows + 1,
+            lines.len().saturating_sub(viewport_height),
+        ];
+
+        let mut summary = format!(
+            "total_lines: {}\nimage_height_rows: {}\nviewport_height: {}\n\n",
+            lines.len(),
+            img.height_rows,
+            viewport_height
+        );
+        for offset in offsets {
+            let visible = visible_images(&images, offset, viewport_height);
+            summary.push_str(&format!(
+                "scroll_offset={}: {} visible image(s)\n",
+                offset,
+                visible.len(),
+            ));
+        }
+
+        assert_snapshot!(summary);
+    }
+
+    // -----------------------------------------------------------------------
+    // ANSI clipping tests
+    // -----------------------------------------------------------------------
+
+    fn load_ansi_fixture() -> String {
+        std::fs::read_to_string("tests/fixtures/autobahn.ansi").unwrap()
+    }
+
+    /// Collect lines visible in a viewport and join them back into raw ANSI
+    /// output (one line per terminal row, separated by `\n`).
+    fn viewport_slice(lines: &[String], scroll_offset: usize, viewport_height: usize) -> Vec<u8> {
+        let end = (scroll_offset + viewport_height).min(lines.len());
+        lines[scroll_offset..end].join("\n").into_bytes()
+    }
+
+    #[test]
+    fn ansi_processing() {
+        let input = load_ansi_fixture();
+        let (lines, images) = process_input(&input, CELL_W, CELL_H);
+
+        let summary = format!(
+            "expanded_lines: {}\nimages: {}\n\
+             first_line_bytes: {}\nlast_line_bytes: {}",
+            lines.len(),
+            images.len(),
+            lines.first().map_or(0, |l| l.len()),
+            lines.last().map_or(0, |l| l.len()),
+        );
+
+        assert_snapshot!(summary);
+    }
+
+    #[test]
+    fn ansi_clip_top_half_scrolled_off() {
+        let input = load_ansi_fixture();
+        let (lines, _) = process_input(&input, CELL_W, CELL_H);
+        let mid = lines.len() / 2;
+        let clipped = viewport_slice(&lines, mid, lines.len());
+        assert_binary_snapshot("autobahn-clip-top-half.ansi", &clipped);
+    }
+
+    #[test]
+    fn ansi_clip_bottom_cropped() {
+        let input = load_ansi_fixture();
+        let (lines, _) = process_input(&input, CELL_W, CELL_H);
+        let mid = lines.len() / 2;
+        let clipped = viewport_slice(&lines, 0, mid);
+        assert_binary_snapshot("autobahn-clip-bottom-half.ansi", &clipped);
+    }
+
+    #[test]
+    fn ansi_clip_middle_visible() {
+        let input = load_ansi_fixture();
+        let (lines, _) = process_input(&input, CELL_W, CELL_H);
+        let quarter = lines.len() / 4;
+        let clipped = viewport_slice(&lines, quarter, lines.len() / 2);
+        assert_binary_snapshot("autobahn-clip-middle.ansi", &clipped);
+    }
+
+    #[test]
+    fn ansi_clip_single_row_visible() {
+        let input = load_ansi_fixture();
+        let (lines, _) = process_input(&input, CELL_W, CELL_H);
+        let clipped = viewport_slice(&lines, lines.len() - 1, 1);
+        assert_binary_snapshot("autobahn-clip-single-row.ansi", &clipped);
+    }
+}

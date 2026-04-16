@@ -20,3 +20,6 @@ unicode-width = "0.2.2"
 clap = { version = "4.4", features = ["derive"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+insta = "1"

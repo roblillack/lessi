@@ -1,0 +1,5 @@
+---
+source: src/pager.rs
+expression: "format!(\"total_block_characters: {}\", total_block_chars)"
+---
+total_block_characters: 4924

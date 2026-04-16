@@ -2135,3 +2135,96 @@ pub fn fits_in_viewport(line_count: usize) -> bool {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn ansi_parsing_plain_text() {
+        let input = std::fs::read_to_string("tests/fixtures/autobahn.ansi").unwrap();
+        let lines: Vec<&str> = input.lines().collect();
+
+        let mut summary = format!("total_lines: {}\n\n", lines.len());
+
+        for (i, line) in lines.iter().enumerate() {
+            let parsed = ParsedLine::from_ansi(line);
+            summary.push_str(&format!(
+                "line {:>2}: segments={:<3} plain_chars={:<4} plain={:?}\n",
+                i,
+                parsed.segments.len(),
+                parsed.plain.chars().count(),
+                parsed.plain,
+            ));
+        }
+
+        assert_snapshot!(summary);
+    }
+
+    #[test]
+    fn ansi_parsing_preserves_block_characters() {
+        let input = std::fs::read_to_string("tests/fixtures/autobahn.ansi").unwrap();
+        let lines: Vec<&str> = input.lines().collect();
+
+        // Verify that Unicode block characters survive ANSI parsing
+        let mut total_block_chars = 0usize;
+        for line in &lines {
+            let parsed = ParsedLine::from_ansi(line);
+            for ch in parsed.plain.chars() {
+                if ('\u{2580}'..='\u{259F}').contains(&ch) {
+                    total_block_chars += 1;
+                }
+            }
+        }
+
+        assert_snapshot!(format!("total_block_characters: {}", total_block_chars));
+    }
+
+    #[test]
+    fn ansi_truecolor_segments() {
+        let input = std::fs::read_to_string("tests/fixtures/autobahn.ansi").unwrap();
+        let lines: Vec<&str> = input.lines().collect();
+
+        // Summarize color usage across all lines
+        let mut total_segments = 0usize;
+        let mut segments_with_fg = 0usize;
+        let mut segments_with_bg = 0usize;
+        let mut segments_with_rgb_fg = 0usize;
+        let mut segments_with_rgb_bg = 0usize;
+
+        for line in &lines {
+            let parsed = ParsedLine::from_ansi(line);
+            for seg in &parsed.segments {
+                total_segments += 1;
+                if seg.style.fg.is_some() {
+                    segments_with_fg += 1;
+                    if matches!(seg.style.fg, Some(Color::Rgb { .. })) {
+                        segments_with_rgb_fg += 1;
+                    }
+                }
+                if seg.style.bg.is_some() {
+                    segments_with_bg += 1;
+                    if matches!(seg.style.bg, Some(Color::Rgb { .. })) {
+                        segments_with_rgb_bg += 1;
+                    }
+                }
+            }
+        }
+
+        let summary = format!(
+            "total_segments: {}\n\
+             segments_with_fg: {}\n\
+             segments_with_bg: {}\n\
+             segments_with_rgb_fg: {}\n\
+             segments_with_rgb_bg: {}",
+            total_segments,
+            segments_with_fg,
+            segments_with_bg,
+            segments_with_rgb_fg,
+            segments_with_rgb_bg,
+        );
+
+        assert_snapshot!(summary);
+    }
+}

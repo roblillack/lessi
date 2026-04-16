@@ -1,0 +1,9 @@
+---
+source: src/pager.rs
+expression: summary
+---
+total_segments: 4691
+segments_with_fg: 4691
+segments_with_bg: 4691
+segments_with_rgb_fg: 4691
+segments_with_rgb_bg: 4691

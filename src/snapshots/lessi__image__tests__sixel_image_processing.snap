@@ -1,0 +1,18 @@
+---
+source: src/image.rs
+expression: summary
+---
+expanded_lines: 48
+images: 1
+
+--- Image 0 ---
+line_idx: 0
+col: 23
+height_rows: 48
+width_cols: 126
+protocol: Sixel
+sixel_row_count: 126
+sixel_data_start: 16
+sixel_row_offsets_count: 125
+sixel_color_defs_count: 256
+data_length: 916100
