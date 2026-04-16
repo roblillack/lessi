@@ -18,7 +18,7 @@ use std::io::{self, Stdout, Write};
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
 
-use crate::image::{clip_sixel, visible_images, ImageProtocol, InlineImage};
+use crate::image::{clip_kitty, clip_sixel, visible_images, ImageProtocol, InlineImage};
 
 // ---------------------------------------------------------------------------
 // ANSI parsing types
@@ -1363,6 +1363,12 @@ fn render_pager(
         }
     }
 
+    // Delete kitty placements up front so they disappear together with the
+    // old text, not in a separate step after new text is already visible.
+    if images.iter().any(|i| i.protocol == ImageProtocol::Kitty) {
+        stdout.write_all(b"\x1b_Ga=d,d=a;\x1b\\")?;
+    }
+
     // Render text lines
     for row in 0..state.viewport_height {
         let line_idx = state.scroll_offset + row;
@@ -1441,29 +1447,24 @@ fn render_images(
             continue;
         }
 
-        let needs_clip = skip_top > 0 || img.height_rows > available;
-
         match img.protocol {
             ImageProtocol::Sixel => {
-                if needs_clip {
-                    if let Some(clipped) = clip_sixel(img, skip_top, available, cell_h) {
-                        queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
-                        stdout.flush()?;
-                        stdout.write_all(&clipped)?;
-                    }
-                } else {
+                // Always go through clip_sixel so the raster height is
+                // clamped to the visible area.  When no actual clipping is
+                // needed the fast-path inside clip_sixel returns the
+                // original data unchanged.
+                if let Some(data) = clip_sixel(img, skip_top, available, cell_h) {
                     queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
                     stdout.flush()?;
-                    stdout.write_all(&img.data)?;
+                    stdout.write_all(&data)?;
                 }
             }
             ImageProtocol::Kitty => {
-                if !needs_clip {
+                if let Some(data) = clip_kitty(img, skip_top, available, cell_h) {
                     queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
                     stdout.flush()?;
-                    stdout.write_all(&img.data)?;
+                    stdout.write_all(&data)?;
                 }
-                // Kitty clipping would require re-encoding; skip partial images.
             }
         }
         queue!(stdout, SetAttribute(Attribute::Reset), ResetColor)?;
@@ -1584,11 +1585,9 @@ fn draw_scrollbar(
         .max(1)
         .min(viewport_height);
     let max_scroll = total_lines - viewport_height;
-    let knob_start = if max_scroll == 0 {
-        0
-    } else {
-        (scroll_offset * (viewport_height - knob_size)) / max_scroll
-    };
+    let knob_start = (scroll_offset * (viewport_height - knob_size))
+        .checked_div(max_scroll)
+        .unwrap_or(0);
     let knob_end = knob_start + knob_size;
 
     for row in 0..viewport_height {
@@ -1795,10 +1794,8 @@ fn handle_key_event(
                 *needs_redraw = true;
             }
         }
-        KeyCode::BackTab => {
-            if state.focus_prev_link() {
-                *needs_redraw = true;
-            }
+        KeyCode::BackTab if state.focus_prev_link() => {
+            *needs_redraw = true;
         }
         KeyCode::Enter => {
             if let Some(target) = state.current_link_target() {
@@ -1915,18 +1912,18 @@ fn handle_mouse_event(
                 *needs_redraw = true;
             }
         }
-        MouseEventKind::Moved => {
-            if !state.is_dragging() {
-                if row < state.viewport_height {
-                    let line_idx = state.scroll_offset + row;
-                    if state.hover_link_at(line_idx, column) {
-                        *needs_redraw = true;
-                    }
-                } else if state.clear_hover() {
+        MouseEventKind::Moved if !state.is_dragging() => {
+            if row < state.viewport_height {
+                let line_idx = state.scroll_offset + row;
+                if state.hover_link_at(line_idx, column) {
                     *needs_redraw = true;
                 }
+            } else if state.clear_hover() {
+                *needs_redraw = true;
             }
         }
+        MouseEventKind::Moved => {}
+
         MouseEventKind::Drag(MouseButton::Left) => {
             if state.is_dragging() {
                 let dragging_scrollbar = state.dragging_scrollbar();
@@ -2133,5 +2130,98 @@ pub fn fits_in_viewport(line_count: usize) -> bool {
         line_count <= viewport_height
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use insta::assert_snapshot;
+
+    #[test]
+    fn ansi_parsing_plain_text() {
+        let input = std::fs::read_to_string("tests/fixtures/autobahn.ansi").unwrap();
+        let lines: Vec<&str> = input.lines().collect();
+
+        let mut summary = format!("total_lines: {}\n\n", lines.len());
+
+        for (i, line) in lines.iter().enumerate() {
+            let parsed = ParsedLine::from_ansi(line);
+            summary.push_str(&format!(
+                "line {:>2}: segments={:<3} plain_chars={:<4} plain={:?}\n",
+                i,
+                parsed.segments.len(),
+                parsed.plain.chars().count(),
+                parsed.plain,
+            ));
+        }
+
+        assert_snapshot!(summary);
+    }
+
+    #[test]
+    fn ansi_parsing_preserves_block_characters() {
+        let input = std::fs::read_to_string("tests/fixtures/autobahn.ansi").unwrap();
+        let lines: Vec<&str> = input.lines().collect();
+
+        // Verify that Unicode block characters survive ANSI parsing
+        let mut total_block_chars = 0usize;
+        for line in &lines {
+            let parsed = ParsedLine::from_ansi(line);
+            for ch in parsed.plain.chars() {
+                if ('\u{2580}'..='\u{259F}').contains(&ch) {
+                    total_block_chars += 1;
+                }
+            }
+        }
+
+        assert_snapshot!(format!("total_block_characters: {}", total_block_chars));
+    }
+
+    #[test]
+    fn ansi_truecolor_segments() {
+        let input = std::fs::read_to_string("tests/fixtures/autobahn.ansi").unwrap();
+        let lines: Vec<&str> = input.lines().collect();
+
+        // Summarize color usage across all lines
+        let mut total_segments = 0usize;
+        let mut segments_with_fg = 0usize;
+        let mut segments_with_bg = 0usize;
+        let mut segments_with_rgb_fg = 0usize;
+        let mut segments_with_rgb_bg = 0usize;
+
+        for line in &lines {
+            let parsed = ParsedLine::from_ansi(line);
+            for seg in &parsed.segments {
+                total_segments += 1;
+                if seg.style.fg.is_some() {
+                    segments_with_fg += 1;
+                    if matches!(seg.style.fg, Some(Color::Rgb { .. })) {
+                        segments_with_rgb_fg += 1;
+                    }
+                }
+                if seg.style.bg.is_some() {
+                    segments_with_bg += 1;
+                    if matches!(seg.style.bg, Some(Color::Rgb { .. })) {
+                        segments_with_rgb_bg += 1;
+                    }
+                }
+            }
+        }
+
+        let summary = format!(
+            "total_segments: {}\n\
+             segments_with_fg: {}\n\
+             segments_with_bg: {}\n\
+             segments_with_rgb_fg: {}\n\
+             segments_with_rgb_bg: {}",
+            total_segments,
+            segments_with_fg,
+            segments_with_bg,
+            segments_with_rgb_fg,
+            segments_with_rgb_bg,
+        );
+
+        assert_snapshot!(summary);
     }
 }

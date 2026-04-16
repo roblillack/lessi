@@ -1,0 +1,15 @@
+---
+source: src/image.rs
+expression: summary
+---
+total_lines: 48
+image_height_rows: 48
+viewport_height: 24
+
+scroll_offset=0: 1 visible image(s)
+scroll_offset=12: 1 visible image(s)
+scroll_offset=24: 1 visible image(s)
+scroll_offset=47: 1 visible image(s)
+scroll_offset=48: 0 visible image(s)
+scroll_offset=49: 0 visible image(s)
+scroll_offset=24: 1 visible image(s)

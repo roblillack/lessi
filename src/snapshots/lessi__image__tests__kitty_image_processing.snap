@@ -1,0 +1,19 @@
+---
+source: src/image.rs
+assertion_line: 1758
+expression: summary
+---
+expanded_lines: 36
+images: 1
+
+--- Image 0 ---
+line_idx: 0
+col: 0
+height_rows: 35
+width_cols: 93
+protocol: Kitty
+sixel_row_count: 0
+sixel_data_start: 0
+sixel_row_offsets_count: 0
+sixel_color_defs_count: 0
+data_length: 757984
