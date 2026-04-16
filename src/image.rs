@@ -266,6 +266,54 @@ fn scan_line_for_images(line: &str, cell_w: usize, cell_h: usize) -> LineScanRes
                     continue;
                 }
             }
+
+            // Not a recognised image sequence — copy to `cleaned` so
+            // downstream ANSI parsing still sees it, but do NOT advance
+            // `col` (escape sequences occupy no screen columns).
+            if bytes[i + 1] == b'[' {
+                // CSI: ESC [ <params> <final byte 0x40..0x7E>
+                cleaned.push('\x1b');
+                cleaned.push('[');
+                let mut j = i + 2;
+                while j < bytes.len() {
+                    cleaned.push(bytes[j] as char);
+                    let done = (0x40..=0x7e).contains(&bytes[j]);
+                    j += 1;
+                    if done {
+                        break;
+                    }
+                }
+                i = j;
+                continue;
+            }
+            if bytes[i + 1] == b']' {
+                // OSC: ESC ] ... (BEL | ESC \)
+                cleaned.push('\x1b');
+                cleaned.push(']');
+                let mut j = i + 2;
+                while j < bytes.len() {
+                    if bytes[j] == 0x07 {
+                        cleaned.push(bytes[j] as char);
+                        j += 1;
+                        break;
+                    }
+                    if bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\' {
+                        cleaned.push('\x1b');
+                        cleaned.push('\\');
+                        j += 2;
+                        break;
+                    }
+                    cleaned.push(bytes[j] as char);
+                    j += 1;
+                }
+                i = j;
+                continue;
+            }
+            // Other two-byte ESC sequence (e.g. ESC c, ESC 7, …)
+            cleaned.push('\x1b');
+            cleaned.push(bytes[i + 1] as char);
+            i += 2;
+            continue;
         }
 
         // Regular character: copy through
@@ -462,9 +510,14 @@ pub fn clip_sixel(
 
     // --- Convert terminal rows → sixel rows --------------------------------
     // Each terminal row = cell_h pixels, each sixel row = 6 pixels.
+    //
+    // Use floor division for keep_sixel_rows so the emitted data never
+    // exceeds the visible area.  This prevents sixel pixels from bleeding
+    // past the viewport into the status bar — important because not all
+    // terminals clip sixel output to the declared raster height.
     let skip_sixel_top = (skip_top * cell_h) / 6;
     let keep_pixels = visible_rows * cell_h;
-    let keep_sixel_rows = keep_pixels.div_ceil(6);
+    let keep_sixel_rows = (keep_pixels / 6).max(1);
 
     if skip_sixel_top >= img.sixel_row_count {
         return None;
@@ -871,7 +924,7 @@ mod tests {
     /// generated in one run.
     fn assert_binary_snapshot(name: &str, data: &[u8]) {
         let path = format!("tests/fixtures/{}", name);
-        let update = std::env::var("UPDATE_SNAPSHOTS").map_or(false, |v| v == "1");
+        let update = std::env::var("UPDATE_SNAPSHOTS").is_ok_and(|v| v == "1");
 
         if update || !std::path::Path::new(&path).exists() {
             std::fs::write(&path, data).unwrap();
@@ -1012,6 +1065,88 @@ mod tests {
         assert_binary_snapshot("autobahn-clip-single-row.sixel", &clipped);
     }
 
+    /// Simulates the scenario where a sixel image is at the bottom of a file
+    /// and only `available` terminal rows are visible.  This is the bottom-crop
+    /// case (skip_top=0, keep_rows=available).
+    #[test]
+    fn sixel_clip_first_row_entering_viewport() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        // Only 1 terminal row of the image is visible (image just entered viewport)
+        let clipped =
+            clip_sixel(img, 0, 1, CELL_H).expect("clip should return Some for first visible row");
+
+        // The clipped sixel must fit within 1 terminal row = CELL_H pixels.
+        // Re-analyze the output to verify it doesn't overflow.
+        let info = analyze_sixel(&clipped, CELL_W, CELL_H);
+        let actual_pixels = info.sixel_row_count * 6;
+        assert!(
+            actual_pixels <= CELL_H,
+            "clipped data has {} pixels ({} sixel rows × 6) but only {} pixels \
+             available (1 row × cell_h={})",
+            actual_pixels,
+            info.sixel_row_count,
+            CELL_H,
+            CELL_H,
+        );
+
+        assert_binary_snapshot("autobahn-clip-first-row.sixel", &clipped);
+    }
+
+    /// Same as above but with a few more rows visible — the common case when
+    /// scrolling an image into view with half-page or page-down.
+    #[test]
+    fn sixel_clip_entering_viewport_5_rows() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let available = 5;
+        let clipped = clip_sixel(img, 0, available, CELL_H).expect("clip should return Some");
+
+        let info = analyze_sixel(&clipped, CELL_W, CELL_H);
+        let actual_pixels = info.sixel_row_count * 6;
+        let max_pixels = available * CELL_H;
+        assert!(
+            actual_pixels <= max_pixels,
+            "clipped data has {} pixels ({} sixel rows × 6) but only {} pixels \
+             available ({} rows × cell_h={})",
+            actual_pixels,
+            info.sixel_row_count,
+            max_pixels,
+            available,
+            CELL_H,
+        );
+
+        assert_binary_snapshot("autobahn-clip-entering-5-rows.sixel", &clipped);
+    }
+
+    /// Verify the top-clip direction doesn't leak pixels from scrolled-off rows.
+    #[test]
+    fn sixel_clip_last_row_leaving_viewport() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        // Image scrolled so only the last row is visible (top 47 rows clipped).
+        let skip_top = img.height_rows - 1;
+        let clipped = clip_sixel(img, skip_top, img.height_rows, CELL_H)
+            .expect("clip should return Some for last visible row");
+
+        let info = analyze_sixel(&clipped, CELL_W, CELL_H);
+        let actual_pixels = info.sixel_row_count * 6;
+        assert!(
+            actual_pixels <= CELL_H,
+            "clipped data has {} pixels but only {} available",
+            actual_pixels,
+            CELL_H,
+        );
+
+        assert_binary_snapshot("autobahn-clip-last-row.sixel", &clipped);
+    }
+
     #[test]
     fn sixel_fully_scrolled_past() {
         let input = load_sixel_fixture();
@@ -1071,6 +1206,77 @@ mod tests {
         }
 
         assert_snapshot!(summary);
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration: reproduce the demo-file scenario
+    // -----------------------------------------------------------------------
+
+    /// Reproduce the exact scenario from the bug report: README.md text
+    /// followed by a sixel image, scrolled so the first image line just
+    /// enters the viewport.  Exercises the same logic as render_images().
+    #[test]
+    fn demo_file_image_entering_viewport() {
+        let readme = std::fs::read_to_string("README.md").unwrap();
+        let sixel = std::fs::read_to_string("tests/fixtures/autobahn.sixel").unwrap();
+        let input = format!("{}\n{}", readme, sixel);
+
+        // Try several plausible cell sizes (the exact value depends on the
+        // user's terminal font).
+        for cell_h in [16, 20, 24, 28, 32] {
+            let cell_w = 8usize;
+            let (_lines, images) = process_input(&input, cell_w, cell_h);
+            assert_eq!(images.len(), 1, "cell_h={cell_h}: expected 1 image");
+            let img = &images[0];
+
+            let viewport_height = 44usize; // typical terminal
+
+            // Simulate render_images() logic at the critical scroll offset
+            // where the image's first line is the last viewport row.
+            let scroll_offset = img.line_idx.saturating_sub(viewport_height - 1);
+            let vis = visible_images(&images, scroll_offset, viewport_height);
+            assert_eq!(vis.len(), 1, "cell_h={cell_h}: image should be visible");
+
+            let skip_top = scroll_offset.saturating_sub(img.line_idx);
+            let viewport_row = img.line_idx.saturating_sub(scroll_offset);
+            let available = viewport_height.saturating_sub(viewport_row);
+
+            assert_eq!(skip_top, 0, "cell_h={cell_h}");
+            assert_eq!(viewport_row, viewport_height - 1, "cell_h={cell_h}");
+            assert_eq!(available, 1, "cell_h={cell_h}");
+
+            let needs_clip = skip_top > 0 || img.height_rows > available;
+            assert!(
+                needs_clip,
+                "cell_h={cell_h}: needs_clip must be true! \
+                 height_rows={} available={}",
+                img.height_rows, available,
+            );
+
+            let clipped = clip_sixel(img, skip_top, available, cell_h)
+                .unwrap_or_else(|| panic!("cell_h={cell_h}: clip_sixel must return Some"));
+
+            // The critical check: the clipped data must not exceed 1 terminal
+            // row of pixels.  If it does, the terminal will push the status
+            // bar off-screen.
+            let info = analyze_sixel(&clipped, cell_w, cell_h);
+            let actual_pixels = info.sixel_row_count * 6;
+            assert!(
+                actual_pixels <= cell_h,
+                "cell_h={cell_h}: clipped sixel has {actual_pixels}px \
+                 ({} sixel rows) but only {cell_h}px available in 1 row",
+                info.sixel_row_count,
+            );
+
+            // Also verify the output is much smaller than the original.
+            assert!(
+                clipped.len() < img.data.len() / 2,
+                "cell_h={cell_h}: clipped output ({} bytes) should be much \
+                 smaller than original ({} bytes)",
+                clipped.len(),
+                img.data.len(),
+            );
+        }
     }
 
     // -----------------------------------------------------------------------

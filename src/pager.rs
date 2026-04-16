@@ -1441,23 +1441,20 @@ fn render_images(
             continue;
         }
 
-        let needs_clip = skip_top > 0 || img.height_rows > available;
-
         match img.protocol {
             ImageProtocol::Sixel => {
-                if needs_clip {
-                    if let Some(clipped) = clip_sixel(img, skip_top, available, cell_h) {
-                        queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
-                        stdout.flush()?;
-                        stdout.write_all(&clipped)?;
-                    }
-                } else {
+                // Always go through clip_sixel so the raster height is
+                // clamped to the visible area.  When no actual clipping is
+                // needed the fast-path inside clip_sixel returns the
+                // original data unchanged.
+                if let Some(data) = clip_sixel(img, skip_top, available, cell_h) {
                     queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
                     stdout.flush()?;
-                    stdout.write_all(&img.data)?;
+                    stdout.write_all(&data)?;
                 }
             }
             ImageProtocol::Kitty => {
+                let needs_clip = skip_top > 0 || img.height_rows > available;
                 if !needs_clip {
                     queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
                     stdout.flush()?;

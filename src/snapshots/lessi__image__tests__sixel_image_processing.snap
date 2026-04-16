@@ -7,7 +7,7 @@ images: 1
 
 --- Image 0 ---
 line_idx: 0
-col: 23
+col: 0
 height_rows: 48
 width_cols: 126
 protocol: Sixel
