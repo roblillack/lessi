@@ -18,6 +18,9 @@ path = "src/main.rs"
 crossterm = { version = "0.29", features = ["use-dev-tty"] }
 unicode-width = "0.2.2"
 clap = { version = "4.4", features = ["derive"] }
+base64 = "0.22"
+flate2 = "1"
+png = "0.17"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

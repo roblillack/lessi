@@ -582,6 +582,328 @@ pub fn clip_sixel(
     Some(result)
 }
 
+// ---------------------------------------------------------------------------
+// Kitty clipping
+// ---------------------------------------------------------------------------
+
+use base64::Engine;
+
+/// Maximum base64 payload bytes per kitty APC chunk.
+const KITTY_CHUNK_SIZE: usize = 4096;
+
+/// A parsed chunk from a kitty graphics sequence.
+struct KittyChunk {
+    /// The control parameter string (between 'G' and ';' or ST).
+    control: String,
+    /// The payload bytes (between ';' and ST). Empty if no payload.
+    payload: Vec<u8>,
+}
+
+/// Parsed control parameters from a kitty graphics chunk.
+struct KittyControl {
+    format: u32,      // f= (24=RGB, 32=RGBA, 100=PNG)
+    pixel_w: usize,   // s=
+    pixel_h: usize,   // v=
+    compressed: bool, // o=z
+    /// All other key=value pairs preserved verbatim (a, c, i, p, t, …).
+    other_params: Vec<(String, String)>,
+}
+
+/// Parse all kitty APC chunks from raw image data.
+/// Each chunk has the form: ESC _ G <control> [; <payload>] ESC \
+fn parse_kitty_chunks(data: &[u8]) -> Vec<KittyChunk> {
+    let mut chunks = Vec::new();
+    let mut i = 0;
+    while i + 2 < data.len() {
+        if data[i] == 0x1b && data[i + 1] == b'_' && data[i + 2] == b'G' {
+            i += 3; // skip ESC _ G
+            let ctrl_start = i;
+            while i < data.len() && data[i] != b';' && data[i] != 0x1b {
+                i += 1;
+            }
+            let control = String::from_utf8_lossy(&data[ctrl_start..i]).to_string();
+
+            let mut payload = Vec::new();
+            if i < data.len() && data[i] == b';' {
+                i += 1;
+                let payload_start = i;
+                while i < data.len() {
+                    if data[i] == 0x1b && i + 1 < data.len() && data[i + 1] == b'\\' {
+                        break;
+                    }
+                    i += 1;
+                }
+                payload = data[payload_start..i].to_vec();
+            }
+
+            if i + 1 < data.len() && data[i] == 0x1b && data[i + 1] == b'\\' {
+                i += 2;
+            }
+
+            chunks.push(KittyChunk { control, payload });
+        } else {
+            i += 1;
+        }
+    }
+    chunks
+}
+
+/// Extract structured control parameters from the first chunk's control string.
+fn parse_kitty_control(control: &str) -> KittyControl {
+    let mut format = 32u32;
+    let mut pixel_w = 0usize;
+    let mut pixel_h = 0usize;
+    let mut compressed = false;
+    let mut other_params = Vec::new();
+
+    for kv in control.split(',') {
+        if let Some((key, value)) = kv.split_once('=') {
+            match key {
+                "f" => format = value.parse().unwrap_or(32),
+                "s" => pixel_w = value.parse().unwrap_or(0),
+                "v" => pixel_h = value.parse().unwrap_or(0),
+                "o" => compressed = value == "z",
+                // Managed by clipper — drop these
+                "r" | "m" | "y" | "h" => {}
+                _ => other_params.push((key.to_string(), value.to_string())),
+            }
+        }
+    }
+
+    KittyControl {
+        format,
+        pixel_w,
+        pixel_h,
+        compressed,
+        other_params,
+    }
+}
+
+/// Rebuild a kitty control string with updated dimensions and format.
+///
+/// Does NOT emit `r=` (display rows) — the terminal auto-calculates the
+/// correct row count from the pixel data.  Emitting an explicit `r=` would
+/// cause the terminal to *scale* the image to fit that many rows, which
+/// produces visible resizing artefacts when the cropped pixel height doesn't
+/// align exactly to cell boundaries.
+fn rebuild_kitty_control(
+    ctrl: &KittyControl,
+    new_format: u32,
+    new_pixel_w: usize,
+    new_pixel_h: usize,
+    new_compressed: bool,
+) -> String {
+    let mut parts = Vec::new();
+
+    for (k, v) in &ctrl.other_params {
+        parts.push(format!("{k}={v}"));
+    }
+
+    parts.push(format!("f={new_format}"));
+    parts.push(format!("s={new_pixel_w}"));
+    parts.push(format!("v={new_pixel_h}"));
+    if new_compressed {
+        parts.push("o=z".to_string());
+    }
+
+    parts.join(",")
+}
+
+/// Build a complete (possibly multi-chunk) kitty APC sequence.
+fn build_kitty_sequence(control: &str, b64_payload: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+
+    if b64_payload.len() <= KITTY_CHUNK_SIZE {
+        // Single chunk — no m= needed
+        result.extend_from_slice(b"\x1b_G");
+        result.extend_from_slice(control.as_bytes());
+        result.push(b';');
+        result.extend_from_slice(b64_payload);
+        result.extend_from_slice(b"\x1b\\");
+    } else {
+        let total_chunks = b64_payload.len().div_ceil(KITTY_CHUNK_SIZE);
+        for (i, chunk) in b64_payload.chunks(KITTY_CHUNK_SIZE).enumerate() {
+            result.extend_from_slice(b"\x1b_G");
+            if i == 0 {
+                result.extend_from_slice(control.as_bytes());
+                result.extend_from_slice(b",m=1");
+            } else if i < total_chunks - 1 {
+                result.extend_from_slice(b"m=1");
+            } else {
+                result.extend_from_slice(b"m=0");
+            }
+            result.push(b';');
+            result.extend_from_slice(chunk);
+            result.extend_from_slice(b"\x1b\\");
+        }
+    }
+
+    result
+}
+
+/// Decode a PNG byte stream into raw pixels, returning (pixels, width, height,
+/// color_type, bit_depth).
+fn decode_png(data: &[u8]) -> Option<(Vec<u8>, usize, usize, png::ColorType, png::BitDepth)> {
+    let decoder = png::Decoder::new(data);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut buf).ok()?;
+    buf.truncate(frame.buffer_size());
+    Some((
+        buf,
+        frame.width as usize,
+        frame.height as usize,
+        frame.color_type,
+        frame.bit_depth,
+    ))
+}
+
+/// Encode raw pixels back into a PNG byte stream.
+fn encode_png(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    color_type: png::ColorType,
+    bit_depth: png::BitDepth,
+) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut buf, width as u32, height as u32);
+        enc.set_color(color_type);
+        enc.set_depth(bit_depth);
+        enc.set_compression(png::Compression::Fast);
+        let mut writer = enc.write_header().ok()?;
+        writer.write_image_data(pixels).ok()?;
+    }
+    Some(buf)
+}
+
+/// Build a clipped kitty image by decoding the pixel payload, cropping rows,
+/// and re-encoding.  This is analogous to `clip_sixel` — the output contains
+/// only the pixels that should be visible, so byte count scales with the
+/// visible area rather than the full image.
+///
+/// `skip_top`  — number of terminal rows to remove from the top  (0 = keep top)
+/// `keep_rows` — maximum number of terminal rows to keep         (0 = nothing)
+///
+/// Returns `None` if nothing remains after clipping.
+pub fn clip_kitty(
+    img: &InlineImage,
+    skip_top: usize,
+    keep_rows: usize,
+    cell_h: usize,
+) -> Option<Vec<u8>> {
+    if keep_rows == 0 || skip_top >= img.height_rows {
+        return None;
+    }
+
+    let visible_rows = keep_rows.min(img.height_rows - skip_top);
+
+    // Fast path: no clipping needed
+    if skip_top == 0 && visible_rows >= img.height_rows {
+        return Some(img.data.clone());
+    }
+
+    let chunks = parse_kitty_chunks(&img.data);
+    if chunks.is_empty() {
+        return None;
+    }
+
+    // --- Decode payload ----------------------------------------------------
+    let ctrl = parse_kitty_control(&chunks[0].control);
+
+    // Concatenate base64 payloads from all chunks and decode
+    let b64_cat: Vec<u8> = chunks
+        .iter()
+        .flat_map(|c| c.payload.iter().copied())
+        .collect();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&b64_cat)
+        .ok()?;
+
+    // Decompress if zlib-compressed (only for raw pixel formats)
+    let raw_data = if ctrl.compressed {
+        use flate2::read::ZlibDecoder;
+        use std::io::Read;
+        let mut dec = ZlibDecoder::new(decoded.as_slice());
+        let mut out = Vec::new();
+        dec.read_to_end(&mut out).ok()?;
+        out
+    } else {
+        decoded
+    };
+
+    // --- Decode pixels & determine geometry --------------------------------
+    let (pixels, width, height, out_format, out_color, out_depth) = if ctrl.format == 100 {
+        // PNG: decode to raw pixels
+        let (px, w, h, ct, bd) = decode_png(&raw_data)?;
+        (px, w, h, 100u32, ct, bd)
+    } else {
+        let bpp: usize = if ctrl.format == 24 { 3 } else { 4 };
+        let w = ctrl.pixel_w;
+        let h = ctrl.pixel_h;
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let ct = if bpp == 3 {
+            png::ColorType::Rgb
+        } else {
+            png::ColorType::Rgba
+        };
+        (raw_data, w, h, ctrl.format, ct, png::BitDepth::Eight)
+    };
+
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let bpp = out_color.samples() * (out_depth as usize / 8).max(1);
+    let stride = width * bpp;
+
+    // --- Crop pixel rows ---------------------------------------------------
+    let skip_pixel_rows = (skip_top * cell_h).min(height);
+    let keep_pixel_rows = (visible_rows * cell_h).min(height - skip_pixel_rows);
+    if keep_pixel_rows == 0 {
+        return None;
+    }
+
+    let start = skip_pixel_rows * stride;
+    let end = start + keep_pixel_rows * stride;
+    if end > pixels.len() {
+        return None;
+    }
+    let cropped = &pixels[start..end];
+
+    // --- Re-encode ---------------------------------------------------------
+    let (encoded_payload, final_format, final_compressed) = if out_format == 100 {
+        // Re-encode as PNG — compact and self-describing
+        let png_bytes = encode_png(cropped, width, keep_pixel_rows, out_color, out_depth)?;
+        (png_bytes, 100u32, false)
+    } else if ctrl.compressed {
+        use flate2::write::ZlibEncoder;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+        enc.write_all(cropped).ok()?;
+        let compressed = enc.finish().ok()?;
+        (compressed, ctrl.format, true)
+    } else {
+        (cropped.to_vec(), ctrl.format, false)
+    };
+
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&encoded_payload);
+
+    // --- Build output sequence ---------------------------------------------
+    let new_control = rebuild_kitty_control(
+        &ctrl,
+        final_format,
+        width,
+        keep_pixel_rows,
+        final_compressed,
+    );
+
+    Some(build_kitty_sequence(&new_control, b64.as_bytes()))
+}
+
 /// Find the byte position where the ST (ESC \) starts in sixel data.
 fn find_st_position(data: &[u8]) -> Option<usize> {
     let len = data.len();
@@ -742,6 +1064,7 @@ fn parse_kitty_dimensions(data: &[u8], cell_w: usize, cell_h: usize) -> (usize, 
     let mut rows = 0usize;
     let mut pixel_w = 0usize;
     let mut pixel_h = 0usize;
+    let mut format = 32u32;
 
     for kv in control.split(',') {
         if let Some((key, value)) = kv.split_once('=') {
@@ -750,6 +1073,7 @@ fn parse_kitty_dimensions(data: &[u8], cell_w: usize, cell_h: usize) -> (usize, 
                 "r" => rows = value.parse().unwrap_or(0),
                 "s" => pixel_w = value.parse().unwrap_or(0),
                 "v" => pixel_h = value.parse().unwrap_or(0),
+                "f" => format = value.parse().unwrap_or(32),
                 _ => {}
             }
         }
@@ -758,6 +1082,16 @@ fn parse_kitty_dimensions(data: &[u8], cell_w: usize, cell_h: usize) -> (usize, 
     if cols > 0 && rows > 0 {
         return (cols, rows);
     }
+
+    // For PNG images without explicit pixel dimensions, read them from the
+    // PNG header (IHDR chunk) in the first kitty chunk's payload.
+    if pixel_w == 0 && pixel_h == 0 && format == 100 {
+        if let Some((w, h)) = read_kitty_png_dimensions(data) {
+            pixel_w = w;
+            pixel_h = h;
+        }
+    }
+
     if pixel_w > 0 || pixel_h > 0 {
         if cols == 0 && pixel_w > 0 {
             cols = pixel_w.div_ceil(cell_w);
@@ -767,6 +1101,26 @@ fn parse_kitty_dimensions(data: &[u8], cell_w: usize, cell_h: usize) -> (usize, 
         }
     }
     (cols.max(1), rows.max(1))
+}
+
+/// Read pixel dimensions from the PNG IHDR chunk inside a kitty image's payload.
+/// Only needs the first chunk's payload (IHDR is always at the start).
+fn read_kitty_png_dimensions(data: &[u8]) -> Option<(usize, usize)> {
+    let chunks = parse_kitty_chunks(data);
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(&chunks.first()?.payload)
+        .ok()?;
+    // PNG: 8-byte signature + 4-byte length + 4-byte "IHDR" + 4-byte width + 4-byte height
+    if decoded.len() < 24 || &decoded[0..8] != b"\x89PNG\r\n\x1a\n" {
+        return None;
+    }
+    let w = u32::from_be_bytes([decoded[16], decoded[17], decoded[18], decoded[19]]) as usize;
+    let h = u32::from_be_bytes([decoded[20], decoded[21], decoded[22], decoded[23]]) as usize;
+    if w > 0 && h > 0 {
+        Some((w, h))
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1344,5 +1698,273 @@ mod tests {
         let (lines, _) = process_input(&input, CELL_W, CELL_H);
         let clipped = viewport_slice(&lines, lines.len() - 1, 1);
         assert_binary_snapshot("autobahn-clip-single-row.ansi", &clipped);
+    }
+
+    // -----------------------------------------------------------------------
+    // Kitty clipping tests
+    // -----------------------------------------------------------------------
+
+    fn load_kitty_fixture() -> String {
+        std::fs::read_to_string("tests/fixtures/autobahn.kitty").unwrap()
+    }
+
+    /// Decode a clipped kitty sequence back to raw pixels for verification.
+    fn decode_kitty_to_pixels(data: &[u8]) -> (Vec<u8>, usize, usize) {
+        let chunks = parse_kitty_chunks(data);
+        let ctrl = parse_kitty_control(&chunks[0].control);
+        let b64_cat: Vec<u8> = chunks
+            .iter()
+            .flat_map(|c| c.payload.iter().copied())
+            .collect();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&b64_cat)
+            .unwrap();
+
+        if ctrl.format == 100 {
+            let (px, w, h, _, _) = decode_png(&decoded).unwrap();
+            (px, w, h)
+        } else {
+            let bpp: usize = if ctrl.format == 24 { 3 } else { 4 };
+            let raw = if ctrl.compressed {
+                use flate2::read::ZlibDecoder;
+                use std::io::Read;
+                let mut dec = ZlibDecoder::new(decoded.as_slice());
+                let mut out = Vec::new();
+                dec.read_to_end(&mut out).unwrap();
+                out
+            } else {
+                decoded
+            };
+            let w = ctrl.pixel_w;
+            let h = raw.len() / (w * bpp);
+            (raw, w, h)
+        }
+    }
+
+    #[test]
+    fn kitty_image_processing() {
+        let input = load_kitty_fixture();
+        let (lines, images) = process_input(&input, CELL_W, CELL_H);
+
+        let mut summary = format!(
+            "expanded_lines: {}\nimages: {}\n",
+            lines.len(),
+            images.len()
+        );
+        for (i, img) in images.iter().enumerate() {
+            summary.push_str(&format!(
+                "\n--- Image {} ---\n{}\n",
+                i,
+                summarize_image(img)
+            ));
+        }
+
+        assert_snapshot!(summary);
+    }
+
+    #[test]
+    fn kitty_no_clip_needed() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let result = clip_kitty(img, 0, img.height_rows + 10, CELL_H);
+        let clipped = result.expect("should return Some (fast path: clone)");
+
+        assert_eq!(
+            clipped.len(),
+            img.data.len(),
+            "unclipped should match original size"
+        );
+        assert_eq!(clipped, img.data, "unclipped data should be identical");
+    }
+
+    #[test]
+    fn kitty_clip_top_half_scrolled_off() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let skip_top = img.height_rows / 2;
+        let keep_rows = img.height_rows;
+
+        let clipped = clip_kitty(img, skip_top, keep_rows, CELL_H)
+            .expect("clip should return Some for partial visibility");
+
+        let (_, w, h) = decode_kitty_to_pixels(&clipped);
+        // The pixel height may be slightly less than (height_rows - skip_top) * CELL_H
+        // because height_rows rounds up via div_ceil.
+        let max_h = (img.height_rows - skip_top) * CELL_H;
+        assert!(
+            h > 0 && h <= max_h,
+            "pixel height {h} out of range 1..={max_h}"
+        );
+        assert!(w > 0, "pixel width should be nonzero");
+
+        assert_binary_snapshot("autobahn-clip-top-half.kitty", &clipped);
+    }
+
+    #[test]
+    fn kitty_clip_bottom_cropped() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let clipped = clip_kitty(img, 0, img.height_rows / 2, CELL_H)
+            .expect("clip should return Some for bottom crop");
+
+        assert_binary_snapshot("autobahn-clip-bottom-half.kitty", &clipped);
+    }
+
+    #[test]
+    fn kitty_clip_middle_visible() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let clipped = clip_kitty(img, img.height_rows / 4, img.height_rows / 2, CELL_H)
+            .expect("clip should return Some for middle visibility");
+
+        assert_binary_snapshot("autobahn-clip-middle.kitty", &clipped);
+    }
+
+    #[test]
+    fn kitty_clip_single_row_visible() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let clipped = clip_kitty(img, img.height_rows - 1, 1, CELL_H)
+            .expect("clip should return Some for single row");
+
+        assert_binary_snapshot("autobahn-clip-single-row.kitty", &clipped);
+    }
+
+    #[test]
+    fn kitty_clip_first_row_entering_viewport() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let clipped =
+            clip_kitty(img, 0, 1, CELL_H).expect("clip should return Some for first visible row");
+
+        let (_, _, h) = decode_kitty_to_pixels(&clipped);
+        assert!(
+            h <= CELL_H,
+            "clipped data has {} pixel rows but only {} pixels available (1 row × cell_h={})",
+            h,
+            CELL_H,
+            CELL_H,
+        );
+
+        assert_binary_snapshot("autobahn-clip-first-row.kitty", &clipped);
+    }
+
+    #[test]
+    fn kitty_clip_entering_viewport_5_rows() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let available = 5;
+        let clipped = clip_kitty(img, 0, available, CELL_H).expect("clip should return Some");
+
+        let (_, _, h) = decode_kitty_to_pixels(&clipped);
+        let max_pixels = available * CELL_H;
+        assert!(
+            h <= max_pixels,
+            "clipped data has {} pixel rows but only {} pixels available ({} rows × cell_h={})",
+            h,
+            max_pixels,
+            available,
+            CELL_H,
+        );
+
+        assert_binary_snapshot("autobahn-clip-entering-5-rows.kitty", &clipped);
+    }
+
+    #[test]
+    fn kitty_clip_last_row_leaving_viewport() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let skip_top = img.height_rows - 1;
+        let clipped = clip_kitty(img, skip_top, img.height_rows, CELL_H)
+            .expect("clip should return Some for last visible row");
+
+        let (_, _, h) = decode_kitty_to_pixels(&clipped);
+        assert!(
+            h <= CELL_H,
+            "clipped data has {} pixel rows but only {} available",
+            h,
+            CELL_H,
+        );
+
+        assert_binary_snapshot("autobahn-clip-last-row.kitty", &clipped);
+    }
+
+    #[test]
+    fn kitty_fully_scrolled_past() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let result = clip_kitty(img, img.height_rows, 10, CELL_H);
+        assert!(
+            result.is_none(),
+            "should return None when fully scrolled past"
+        );
+
+        let result2 = clip_kitty(img, img.height_rows + 100, 10, CELL_H);
+        assert!(result2.is_none(), "should return None when far past");
+    }
+
+    #[test]
+    fn kitty_clip_zero_keep_rows() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let result = clip_kitty(img, 0, 0, CELL_H);
+        assert!(result.is_none(), "should return None with keep_rows=0");
+    }
+
+    #[test]
+    fn kitty_clip_reduces_size() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let clipped = clip_kitty(img, 0, 1, CELL_H).expect("should return Some");
+        assert!(
+            clipped.len() < img.data.len() / 2,
+            "clipped output ({} bytes) should be much smaller than original ({} bytes)",
+            clipped.len(),
+            img.data.len(),
+        );
+    }
+
+    #[test]
+    fn kitty_clip_preserves_pixel_content() {
+        let input = load_kitty_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+
+        let (orig_px, orig_w, orig_h) = decode_kitty_to_pixels(&img.data);
+
+        let skip = 5;
+        let keep = 5;
+        let clipped = clip_kitty(img, skip, keep, CELL_H).expect("should return Some");
+        let (clip_px, clip_w, clip_h) = decode_kitty_to_pixels(&clipped);
+
+        assert_eq!(clip_w, orig_w);
+        // Use actual decoded height, not height_rows * CELL_H (which rounds up)
+        let bpp = orig_px.len() / (orig_w * orig_h);
+        let stride = orig_w * bpp;
+        let skip_pixels = skip * CELL_H;
+        let orig_slice = &orig_px[skip_pixels * stride..(skip_pixels + clip_h) * stride];
+        assert_eq!(clip_px, orig_slice);
     }
 }

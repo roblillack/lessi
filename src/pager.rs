@@ -18,7 +18,7 @@ use std::io::{self, Stdout, Write};
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
 
-use crate::image::{clip_sixel, visible_images, ImageProtocol, InlineImage};
+use crate::image::{clip_kitty, clip_sixel, visible_images, ImageProtocol, InlineImage};
 
 // ---------------------------------------------------------------------------
 // ANSI parsing types
@@ -1363,6 +1363,12 @@ fn render_pager(
         }
     }
 
+    // Delete kitty placements up front so they disappear together with the
+    // old text, not in a separate step after new text is already visible.
+    if images.iter().any(|i| i.protocol == ImageProtocol::Kitty) {
+        stdout.write_all(b"\x1b_Ga=d,d=a;\x1b\\")?;
+    }
+
     // Render text lines
     for row in 0..state.viewport_height {
         let line_idx = state.scroll_offset + row;
@@ -1454,13 +1460,11 @@ fn render_images(
                 }
             }
             ImageProtocol::Kitty => {
-                let needs_clip = skip_top > 0 || img.height_rows > available;
-                if !needs_clip {
+                if let Some(data) = clip_kitty(img, skip_top, available, cell_h) {
                     queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
                     stdout.flush()?;
-                    stdout.write_all(&img.data)?;
+                    stdout.write_all(&data)?;
                 }
-                // Kitty clipping would require re-encoding; skip partial images.
             }
         }
         queue!(stdout, SetAttribute(Attribute::Reset), ResetColor)?;
