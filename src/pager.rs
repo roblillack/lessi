@@ -1581,11 +1581,9 @@ fn draw_scrollbar(
         .max(1)
         .min(viewport_height);
     let max_scroll = total_lines - viewport_height;
-    let knob_start = if max_scroll == 0 {
-        0
-    } else {
-        (scroll_offset * (viewport_height - knob_size)) / max_scroll
-    };
+    let knob_start = (scroll_offset * (viewport_height - knob_size))
+        .checked_div(max_scroll)
+        .unwrap_or(0);
     let knob_end = knob_start + knob_size;
 
     for row in 0..viewport_height {
@@ -1792,10 +1790,8 @@ fn handle_key_event(
                 *needs_redraw = true;
             }
         }
-        KeyCode::BackTab => {
-            if state.focus_prev_link() {
-                *needs_redraw = true;
-            }
+        KeyCode::BackTab if state.focus_prev_link() => {
+            *needs_redraw = true;
         }
         KeyCode::Enter => {
             if let Some(target) = state.current_link_target() {
@@ -1912,18 +1908,18 @@ fn handle_mouse_event(
                 *needs_redraw = true;
             }
         }
-        MouseEventKind::Moved => {
-            if !state.is_dragging() {
-                if row < state.viewport_height {
-                    let line_idx = state.scroll_offset + row;
-                    if state.hover_link_at(line_idx, column) {
-                        *needs_redraw = true;
-                    }
-                } else if state.clear_hover() {
+        MouseEventKind::Moved if !state.is_dragging() => {
+            if row < state.viewport_height {
+                let line_idx = state.scroll_offset + row;
+                if state.hover_link_at(line_idx, column) {
                     *needs_redraw = true;
                 }
+            } else if state.clear_hover() {
+                *needs_redraw = true;
             }
         }
+        MouseEventKind::Moved => {}
+
         MouseEventKind::Drag(MouseButton::Left) => {
             if state.is_dragging() {
                 let dragging_scrollbar = state.dragging_scrollbar();
