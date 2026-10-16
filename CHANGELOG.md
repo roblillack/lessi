@@ -42,6 +42,11 @@ While pre-1.0, the minor version is bumped for breaking changes.
   terminal could show it half-drawn: images blanked out until their data
   arrived, the scrollbar wiped until it was drawn again at the end. Every update
   is now sent in a single write.
+- **Flicker on terminals with synchronized output** — screen updates are now
+  marked as synchronized updates (mode 2026), so terminals that support them,
+  such as kitty, WezTerm, foot, Ghostty or recent Windows Terminal versions,
+  show each update only once it is complete. They are not used inside tmux while
+  sixel images are shown, as tmux then sends every image twice.
 
 ## [0.2.2] - 2026-04-16
 

@@ -9,8 +9,8 @@ use crossterm::{
         Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
     },
     terminal::{
-        self, disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
-        LeaveAlternateScreen,
+        self, disable_raw_mode, enable_raw_mode, BeginSynchronizedUpdate, Clear, ClearType,
+        EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
     },
 };
 use std::collections::HashMap;
@@ -311,6 +311,7 @@ struct PagerState {
     drag_state: Option<DragState>,
     filename: Option<String>,
     cell_h: usize,
+    synchronized_updates: bool,
 }
 
 impl PagerState {
@@ -329,6 +330,7 @@ impl PagerState {
             drag_state: None,
             filename: None,
             cell_h: 16,
+            synchronized_updates: false,
         }
     }
 
@@ -1375,6 +1377,9 @@ fn render_pager(
     // already cleared but the image not yet redrawn, or the scrollbar column
     // wiped by the line clears but not yet drawn again.
     let mut frame: Vec<u8> = Vec::with_capacity(64 * 1024);
+    if state.synchronized_updates {
+        queue!(frame, BeginSynchronizedUpdate)?;
+    }
 
     // Delete kitty placements up front so they disappear together with the
     // old text, not in a separate step after new text is already visible.
@@ -1434,6 +1439,9 @@ fn render_pager(
         state.cell_h,
     )?;
 
+    if state.synchronized_updates {
+        queue!(frame, EndSynchronizedUpdate)?;
+    }
     stdout.write_all(&frame)?;
     stdout.flush()
 }
@@ -2002,6 +2010,13 @@ pub fn run_pager(
     let mut state = PagerState::new(content.len(), viewport_height);
     state.filename = filename;
     state.cell_h = cell_h;
+    // Synchronized updates (mode 2026) make the terminal show a frame only
+    // once it is complete; terminals without support ignore them.  tmux
+    // (checked with 3.7-dev) forwards sixel images while an update is pending
+    // and redraws the pane, images included, when it ends: images are sent
+    // twice and the frame still arrives in pieces, so skip them there.
+    let has_sixel = images.iter().any(|i| i.protocol == ImageProtocol::Sixel);
+    state.synchronized_updates = std::env::var_os("TMUX").is_none() || !has_sixel;
     state.rebuild_links(&content);
 
     let mut result = Ok(());
