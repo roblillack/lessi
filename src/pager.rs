@@ -16,6 +16,7 @@ use crossterm::{
 use std::collections::HashMap;
 use std::io::{self, Stdout, Write};
 use std::ops::Range;
+use std::time::Duration;
 use unicode_width::UnicodeWidthChar;
 
 use crate::image::{
@@ -1980,6 +1981,61 @@ fn handle_mouse_event(
     };
 }
 
+/// Apply one input event to the pager state.  Returns `false` to quit.
+fn handle_event(
+    event: Event,
+    state: &mut PagerState,
+    content: &[ParsedLine],
+    needs_redraw: &mut bool,
+    link_to_open: &mut Option<String>,
+) -> bool {
+    match event {
+        Event::Key(key_event) => {
+            let mut key_redraw = false;
+            if !handle_key_event(key_event, state, content, &mut key_redraw, link_to_open) {
+                return false;
+            }
+            *needs_redraw |= key_redraw;
+        }
+        Event::Mouse(mouse_event) => {
+            handle_mouse_event(mouse_event, state, needs_redraw, link_to_open);
+        }
+        Event::Resize(_new_width, new_height) => {
+            let new_viewport_height = new_height.saturating_sub(1) as usize;
+            let relative_position = if state.total_lines <= 1 {
+                0.0
+            } else {
+                let center_line = state.scroll_offset + state.viewport_height / 2;
+                let denom = (state.total_lines.saturating_sub(1)) as f64;
+                (center_line as f64 / denom).clamp(0.0, 1.0)
+            };
+
+            state.viewport_height = new_viewport_height;
+
+            let target_center = if state.total_lines <= 1 {
+                0
+            } else {
+                let denom = (state.total_lines.saturating_sub(1)) as f64;
+                (relative_position * denom).round() as usize
+            };
+            let half_viewport = new_viewport_height / 2;
+            let new_max_scroll = if new_viewport_height == 0 {
+                state.total_lines.saturating_sub(1)
+            } else {
+                state.total_lines.saturating_sub(new_viewport_height)
+            };
+            let mut new_scroll_offset = target_center.saturating_sub(half_viewport);
+            if new_scroll_offset > new_max_scroll {
+                new_scroll_offset = new_max_scroll;
+            }
+            state.scroll_offset = new_scroll_offset;
+            *needs_redraw = true;
+        }
+        _ => {}
+    }
+    true
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -2037,60 +2093,30 @@ pub fn run_pager(
             continue;
         }
 
-        match event::read()? {
-            Event::Key(key_event) => {
-                let mut key_redraw = false;
-                if !handle_key_event(
-                    key_event,
-                    &mut state,
-                    &content,
-                    &mut key_redraw,
-                    &mut pending_link,
-                ) {
-                    break;
-                }
-                needs_redraw |= key_redraw;
-            }
-            Event::Mouse(mouse_event) => {
-                handle_mouse_event(
-                    mouse_event,
-                    &mut state,
-                    &mut needs_redraw,
-                    &mut pending_link,
-                );
-            }
-            Event::Resize(_new_width, new_height) => {
-                let new_viewport_height = new_height.saturating_sub(1) as usize;
-                let relative_position = if state.total_lines <= 1 {
-                    0.0
-                } else {
-                    let center_line = state.scroll_offset + state.viewport_height / 2;
-                    let denom = (state.total_lines.saturating_sub(1)) as f64;
-                    (center_line as f64 / denom).clamp(0.0, 1.0)
-                };
-
-                state.viewport_height = new_viewport_height;
-
-                let target_center = if state.total_lines <= 1 {
-                    0
-                } else {
-                    let denom = (state.total_lines.saturating_sub(1)) as f64;
-                    (relative_position * denom).round() as usize
-                };
-                let half_viewport = new_viewport_height / 2;
-                let new_max_scroll = if new_viewport_height == 0 {
-                    state.total_lines.saturating_sub(1)
-                } else {
-                    state.total_lines.saturating_sub(new_viewport_height)
-                };
-                let mut new_scroll_offset = target_center.saturating_sub(half_viewport);
-                if new_scroll_offset > new_max_scroll {
-                    new_scroll_offset = new_max_scroll;
-                }
-                state.scroll_offset = new_scroll_offset;
-                needs_redraw = true;
-            }
-            _ => {}
+        // Handle all input that is already queued before drawing again.  A held
+        // key or a fast scroll wheel can produce events faster than the
+        // terminal draws frames; drawing each of them keeps the screen
+        // scrolling long after the key is released.  The 1 ms poll can't be
+        // zero: crossterm's /dev/tty event source then never reports queued
+        // events.  A link to open is opened before reading on.
+        let mut running = handle_event(
+            event::read()?,
+            &mut state,
+            &content,
+            &mut needs_redraw,
+            &mut pending_link,
+        );
+        while running && pending_link.is_none() && event::poll(Duration::from_millis(1))? {
+            running = handle_event(
+                event::read()?,
+                &mut state,
+                &content,
+                &mut needs_redraw,
+                &mut pending_link,
+            );
+        }
+        if !running {
+            break;
         }
     }
 

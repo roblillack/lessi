@@ -47,6 +47,11 @@ While pre-1.0, the minor version is bumped for breaking changes.
   such as kitty, WezTerm, foot, Ghostty or recent Windows Terminal versions,
   show each update only once it is complete. They are not used inside tmux while
   sixel images are shown, as tmux then sends every image twice.
+- **Scrolling on after a key is released** — when a held key or the scroll
+  wheel produced events faster than the terminal could draw, typically with
+  large images on screen, each event was drawn in turn, so the screen kept
+  scrolling for seconds after the key was released. All pending input is now
+  handled before the screen is updated.
 
 ## [0.2.2] - 2026-04-16
 
