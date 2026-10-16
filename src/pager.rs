@@ -166,16 +166,16 @@ impl AnsiStyle {
         style
     }
 
-    fn apply(&self, stdout: &mut Stdout) -> io::Result<()> {
+    fn apply(&self, out: &mut Vec<u8>) -> io::Result<()> {
         queue!(
-            stdout,
+            out,
             SetAttribute(Attribute::Reset),
             ResetColor,
             SetForegroundColor(self.fg.unwrap_or(Color::Reset)),
             SetBackgroundColor(self.bg.unwrap_or(Color::Reset))
         )?;
         for attr in self.attributes.attribute_list() {
-            queue!(stdout, SetAttribute(attr))?;
+            queue!(out, SetAttribute(attr))?;
         }
         Ok(())
     }
@@ -1370,16 +1370,22 @@ fn render_pager(
         }
     }
 
+    // Build the whole frame in memory and send it with a single write.
+    // Written piecemeal, the terminal can show it half-drawn: image rows
+    // already cleared but the image not yet redrawn, or the scrollbar column
+    // wiped by the line clears but not yet drawn again.
+    let mut frame: Vec<u8> = Vec::with_capacity(64 * 1024);
+
     // Delete kitty placements up front so they disappear together with the
     // old text, not in a separate step after new text is already visible.
     if images.iter().any(|i| i.protocol == ImageProtocol::Kitty) {
-        stdout.write_all(b"\x1b_Ga=d,d=a;\x1b\\")?;
+        frame.extend_from_slice(b"\x1b_Ga=d,d=a;\x1b\\");
     }
 
     // Render text lines
     for row in 0..state.viewport_height {
         let line_idx = state.scroll_offset + row;
-        queue!(stdout, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))?;
+        queue!(frame, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))?;
         if let Some(line) = content.get(line_idx) {
             let highlights = highlight_map.get(&line_idx).cloned().unwrap_or_default();
             let link_context = LinkRenderContext {
@@ -1387,7 +1393,7 @@ fn render_pager(
                 hovered: state.hovered_link(),
             };
             render_line(
-                stdout,
+                &mut frame,
                 line,
                 line_idx,
                 &highlights,
@@ -1400,7 +1406,7 @@ fn render_pager(
     // Draw scrollbar
     if state.total_lines > state.viewport_height && state.viewport_height > 0 {
         draw_scrollbar(
-            stdout,
+            &mut frame,
             state.scroll_offset,
             state.total_lines,
             state.viewport_height,
@@ -1410,33 +1416,31 @@ fn render_pager(
 
     // Draw status line
     let status_row = state.viewport_height as u16;
-    draw_status_line(stdout, state, terminal_width, status_row)?;
+    draw_status_line(&mut frame, state, terminal_width, status_row)?;
 
     // Clear leftover rows from previous taller terminal
     if previous_height > terminal_height_usize {
         for row in terminal_height_usize..previous_height {
-            queue!(stdout, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))?;
+            queue!(frame, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))?;
         }
     }
 
-    // Flush text before drawing images
-    stdout.flush()?;
-
     // Render visible images
     render_images(
-        stdout,
+        &mut frame,
         images,
         state.scroll_offset,
         state.viewport_height,
         state.cell_h,
     )?;
 
+    stdout.write_all(&frame)?;
     stdout.flush()
 }
 
 /// Render images that are visible in the current viewport.
 fn render_images(
-    stdout: &mut Stdout,
+    out: &mut Vec<u8>,
     images: &[InlineImage],
     scroll_offset: usize,
     viewport_height: usize,
@@ -1461,20 +1465,18 @@ fn render_images(
                 // needed the fast-path inside clip_sixel returns the
                 // original data unchanged.
                 if let Some(data) = clip_sixel(img, skip_top, available, cell_h) {
-                    queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
-                    stdout.flush()?;
-                    stdout.write_all(&data)?;
+                    queue!(out, MoveTo(img.col as u16, viewport_row as u16))?;
+                    out.extend_from_slice(&data);
                 }
             }
             ImageProtocol::Kitty => {
                 if let Some(data) = clip_kitty(img, skip_top, available, cell_h) {
-                    queue!(stdout, MoveTo(img.col as u16, viewport_row as u16))?;
-                    stdout.flush()?;
-                    stdout.write_all(&data)?;
+                    queue!(out, MoveTo(img.col as u16, viewport_row as u16))?;
+                    out.extend_from_slice(&data);
                 }
             }
         }
-        queue!(stdout, SetAttribute(Attribute::Reset), ResetColor)?;
+        queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
     }
 
     Ok(())
@@ -1487,7 +1489,7 @@ struct LinkRenderContext<'a> {
 }
 
 fn render_line(
-    stdout: &mut Stdout,
+    out: &mut Vec<u8>,
     line: &ParsedLine,
     line_idx: usize,
     highlights: &[(usize, usize, bool)],
@@ -1527,20 +1529,20 @@ fn render_line(
             style = style.with_link_style(is_focused, is_hovered && !is_focused);
         }
 
-        style.apply(stdout)?;
+        style.apply(out)?;
         if let Some(hyperlink) = hyperlink_info {
             queue!(
-                stdout,
+                out,
                 Print(format!(
                     "\x1b]8;{};{}\x07",
                     hyperlink.params_fragment(),
                     hyperlink.url
                 ))
             )?;
-            queue!(stdout, Print(render_text.as_str()))?;
-            queue!(stdout, Print("\x1b]8;;\x07"))?;
+            queue!(out, Print(render_text.as_str()))?;
+            queue!(out, Print("\x1b]8;;\x07"))?;
         } else {
-            queue!(stdout, Print(render_text.as_str()))?;
+            queue!(out, Print(render_text.as_str()))?;
         }
 
         char_cursor = chunk_end_char;
@@ -1550,7 +1552,7 @@ fn render_line(
         remaining = remaining.saturating_sub(used_width);
     }
 
-    queue!(stdout, SetAttribute(Attribute::Reset), ResetColor)?;
+    queue!(out, SetAttribute(Attribute::Reset), ResetColor)?;
     Ok(())
 }
 
@@ -1579,7 +1581,7 @@ fn clip_to_width(text: &str, max_width: usize) -> (String, usize, bool) {
 }
 
 fn draw_scrollbar(
-    stdout: &mut Stdout,
+    out: &mut Vec<u8>,
     scroll_offset: usize,
     total_lines: usize,
     viewport_height: usize,
@@ -1598,29 +1600,24 @@ fn draw_scrollbar(
     let knob_end = knob_start + knob_size;
 
     for row in 0..viewport_height {
-        queue!(stdout, MoveTo(column, row as u16))?;
+        queue!(out, MoveTo(column, row as u16))?;
         if row >= knob_start && row < knob_end {
             queue!(
-                stdout,
+                out,
                 SetAttribute(Attribute::Reverse),
                 Print(" "),
                 SetAttribute(Attribute::NoReverse)
             )?;
         } else {
-            queue!(stdout, Print(" "))?;
+            queue!(out, Print(" "))?;
         }
     }
 
-    queue!(stdout, MoveTo(column, viewport_height as u16), Print(" "))?;
+    queue!(out, MoveTo(column, viewport_height as u16), Print(" "))?;
     Ok(())
 }
 
-fn draw_status_line(
-    stdout: &mut Stdout,
-    state: &PagerState,
-    width: u16,
-    row: u16,
-) -> io::Result<()> {
+fn draw_status_line(out: &mut Vec<u8>, state: &PagerState, width: u16, row: u16) -> io::Result<()> {
     let status_text = match &state.search_mode {
         SearchMode::EnteringQuery => format!("/{}", state.search_input),
         SearchMode::Active {
@@ -1656,7 +1653,7 @@ fn draw_status_line(
     let display = truncate_with_padding(&display, width as usize);
 
     queue!(
-        stdout,
+        out,
         MoveTo(0, row),
         Clear(ClearType::CurrentLine),
         SetAttribute(Attribute::Reverse),

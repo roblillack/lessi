@@ -37,6 +37,11 @@ While pre-1.0, the minor version is bumped for breaking changes.
   string terminator, but in UTF-8 it is part of characters such as `✓`, so
   `ESC P` followed later on the line by a `✓` crashed lessi. Only the UTF-8
   encoding of U+009C ends a DCS string now.
+- **Flicker while scrolling** — each screen update reached the terminal in
+  dozens of small writes (1 KiB each, plus a separate one per image), so the
+  terminal could show it half-drawn: images blanked out until their data
+  arrived, the scrollbar wiped until it was drawn again at the end. Every update
+  is now sent in a single write.
 
 ## [0.2.2] - 2026-04-16
 
