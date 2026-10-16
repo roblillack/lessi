@@ -10,6 +10,20 @@ homepage = "https://github.com/roblillack/lessi"
 repository = "https://github.com/roblillack/lessi"
 documentation = "https://docs.rs/lessi"
 
+[package.metadata.release]
+pre-release-replacements = [
+    # Roll CHANGELOG's [Unreleased] over to the new version and re-seed a fresh
+    # [Unreleased] above it (the Keep a Changelog + cargo-release marker idiom).
+    # Order matters: the version/date/compare substitutions run first, *then*
+    # the markers re-insert the literal "Unreleased"/"ReleaseDate" tokens so the
+    # next release finds them again.
+    { file = "CHANGELOG.md", search = "Unreleased", replace = "{{version}}" },
+    { file = "CHANGELOG.md", search = '\.\.\.HEAD', replace = "...{{tag_name}}", exactly = 1 },
+    { file = "CHANGELOG.md", search = "ReleaseDate", replace = "{{date}}" },
+    { file = "CHANGELOG.md", search = "<!-- next-header -->", replace = "<!-- next-header -->\n\n## [Unreleased] - ReleaseDate", exactly = 1 },
+    { file = "CHANGELOG.md", search = "<!-- next-url -->", replace = "<!-- next-url -->\n[Unreleased]: https://github.com/roblillack/lessi/compare/{{tag_name}}...HEAD", exactly = 1 },
+]
+
 [[bin]]
 name = "lessi"
 path = "src/main.rs"
