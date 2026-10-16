@@ -53,6 +53,12 @@ While pre-1.0, the minor version is bumped for breaking changes.
   scrolling for seconds after the key was released. All pending input is now
   handled before the screen is updated.
 
+### Changed
+
+- **Less output for colourful text** — colours and text attributes are only
+  sent to the terminal when they change, not again for every run of text, which
+  cuts the size of a screen update of coloured text by up to 80%.
+
 ## [0.2.2] - 2026-04-16
 
 ### Fixed

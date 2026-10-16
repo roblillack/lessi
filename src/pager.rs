@@ -58,7 +58,7 @@ impl ParsedHyperlink {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct TextAttributes {
     bold: bool,
     dim: bool,
@@ -133,7 +133,7 @@ impl AnsiStyleState {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct AnsiStyle {
     fg: Option<Color>,
     bg: Option<Color>,
@@ -168,13 +168,14 @@ impl AnsiStyle {
     }
 
     fn apply(&self, out: &mut Vec<u8>) -> io::Result<()> {
-        queue!(
-            out,
-            SetAttribute(Attribute::Reset),
-            ResetColor,
-            SetForegroundColor(self.fg.unwrap_or(Color::Reset)),
-            SetBackgroundColor(self.bg.unwrap_or(Color::Reset))
-        )?;
+        // The reset also restores the default colours.
+        queue!(out, SetAttribute(Attribute::Reset))?;
+        if let Some(fg) = self.fg {
+            queue!(out, SetForegroundColor(fg))?;
+        }
+        if let Some(bg) = self.bg {
+            queue!(out, SetBackgroundColor(bg))?;
+        }
         for attr in self.attributes.attribute_list() {
             queue!(out, SetAttribute(attr))?;
         }
@@ -1511,6 +1512,9 @@ fn render_line(
     let chunks = line.to_render_chunks(highlights);
     let mut remaining = width;
     let mut char_cursor = 0usize;
+    // The style last sent to the terminal.  Styled input often repeats the
+    // same colour for every single character, so only send changes.
+    let mut current_style: Option<AnsiStyle> = None;
 
     for chunk in chunks {
         if remaining == 0 {
@@ -1538,7 +1542,10 @@ fn render_line(
             style = style.with_link_style(is_focused, is_hovered && !is_focused);
         }
 
-        style.apply(out)?;
+        if current_style.as_ref() != Some(&style) {
+            style.apply(out)?;
+            current_style = Some(style);
+        }
         if let Some(hyperlink) = hyperlink_info {
             queue!(
                 out,
