@@ -18,7 +18,9 @@ use std::io::{self, Stdout, Write};
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
 
-use crate::image::{clip_kitty, clip_sixel, visible_images, ImageProtocol, InlineImage};
+use crate::image::{
+    clip_kitty, clip_sixel, find_dcs_end, visible_images, ImageProtocol, InlineImage,
+};
 
 // ---------------------------------------------------------------------------
 // ANSI parsing types
@@ -1036,6 +1038,11 @@ impl ParsedLine {
                             i += 1;
                             i += parse_osc_sequence(line, i, &mut style_state);
                             current_style = style_state.to_style();
+                        }
+                        b'P' => {
+                            // DCS string: images were extracted earlier, the
+                            // rest (tmux passthrough, queries, …) isn't shown.
+                            i = find_dcs_end(bytes, i - 1).map_or(bytes.len(), |(end, _)| end);
                         }
                         _ => {
                             i += 1;
@@ -2126,6 +2133,19 @@ mod tests {
         }
 
         assert_snapshot!(summary);
+    }
+
+    #[test]
+    fn ansi_parsing_skips_dcs_strings() {
+        let parsed = ParsedLine::from_ansi("before \x1bP$qm\x1b\\after");
+        assert_eq!(parsed.plain, "before after");
+
+        let parsed = ParsedLine::from_ansi("before \x1bPtmux;\x1b\x1b]0;title\x07\x1b\\after");
+        assert_eq!(parsed.plain, "before after");
+
+        // Unterminated: swallows the rest of the line, as in a terminal.
+        let parsed = ParsedLine::from_ansi("before \x1bP$qm after");
+        assert_eq!(parsed.plain, "before ");
     }
 
     #[test]

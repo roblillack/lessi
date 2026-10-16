@@ -220,24 +220,31 @@ fn scan_line_for_images(line: &str, cell_w: usize, cell_h: usize) -> LineScanRes
         if bytes[i] == 0x1b && i + 1 < bytes.len() {
             // Check for sixel: ESC P ... ESC backslash
             if bytes[i + 1] == b'P' {
-                if let Some((end, data)) = find_sixel_end(bytes, i) {
-                    let info = analyze_sixel(&data, cell_w, cell_h);
-                    let placeholder_width = info.width_cols.max(1);
-                    for _ in 0..placeholder_width {
-                        cleaned.push(' ');
+                if let Some((end, seq_start)) = find_dcs_end(bytes, i) {
+                    let data = &bytes[seq_start..end];
+                    if is_sixel(data) {
+                        let info = analyze_sixel(data, cell_w, cell_h);
+                        let placeholder_width = info.width_cols.max(1);
+                        for _ in 0..placeholder_width {
+                            cleaned.push(' ');
+                        }
+                        images.push(ExtractedImage {
+                            col,
+                            width_cols: placeholder_width,
+                            height_rows: info.height_rows.max(1),
+                            data: data.to_vec(),
+                            protocol: ImageProtocol::Sixel,
+                            sixel_row_count: info.sixel_row_count,
+                            sixel_data_start: info.sixel_data_start,
+                            sixel_row_offsets: info.sixel_row_offsets,
+                            sixel_color_defs: info.sixel_color_defs,
+                        });
+                        col += placeholder_width;
+                    } else {
+                        // Some other DCS string (tmux passthrough, a terminal
+                        // query, …): keep it for the ANSI parser, which skips it.
+                        cleaned.push_str(&line[i..end]);
                     }
-                    images.push(ExtractedImage {
-                        col,
-                        width_cols: placeholder_width,
-                        height_rows: info.height_rows.max(1),
-                        data,
-                        protocol: ImageProtocol::Sixel,
-                        sixel_row_count: info.sixel_row_count,
-                        sixel_data_start: info.sixel_data_start,
-                        sixel_row_offsets: info.sixel_row_offsets,
-                        sixel_color_defs: info.sixel_color_defs,
-                    });
-                    col += placeholder_width;
                     i = end;
                     continue;
                 }
@@ -907,10 +914,9 @@ pub fn clip_kitty(
 /// Find the byte position where the ST (ESC \) starts in sixel data.
 fn find_st_position(data: &[u8]) -> Option<usize> {
     let len = data.len();
-    if len >= 2 && data[len - 2] == 0x1b && data[len - 1] == b'\\' {
+    // ESC \ or C1 ST (U+009C) in UTF-8
+    if len >= 2 && matches!((data[len - 2], data[len - 1]), (0x1b, b'\\') | (0xc2, 0x9c)) {
         Some(len - 2)
-    } else if len >= 1 && data[len - 1] == 0x9c {
-        Some(len - 1)
     } else {
         // Search backwards
         for i in (0..len.saturating_sub(1)).rev() {
@@ -957,21 +963,41 @@ fn adjust_sixel_raster_height(header: &[u8], new_pixel_h: usize) -> Vec<u8> {
 // Sequence finders
 // ---------------------------------------------------------------------------
 
-/// Find the end of a sixel sequence starting at `start`.
-fn find_sixel_end(bytes: &[u8], start: usize) -> Option<(usize, Vec<u8>)> {
+/// Find the end of a DCS string (`ESC P … ST`) starting at `start`.
+///
+/// Returns the end offset and the offset of the introducer the string really
+/// starts at: an `ESC P` met before the terminator aborts the DCS opened
+/// earlier, as it does in a terminal.  Some tools emit `ESC P q ESC P q "…`;
+/// keeping the aborted prefix would hide the raster attributes and the image
+/// would be measured as a single cell.
+pub fn find_dcs_end(bytes: &[u8], start: usize) -> Option<(usize, usize)> {
+    let mut seq_start = start;
     let mut i = start + 2; // skip ESC P
-    while i < bytes.len() {
-        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'\\' {
-            let end = i + 2;
-            return Some((end, bytes[start..end].to_vec()));
+    while i + 1 < bytes.len() {
+        match (bytes[i], bytes[i + 1]) {
+            (0x1b, b'\\') => return Some((i + 2, seq_start)),
+            (0x1b, b'P') => {
+                seq_start = i;
+                i += 2;
+            }
+            // C1 ST (U+009C) in UTF-8.  A lone 0x9c byte is not one: it is
+            // the middle of a character such as '✓'.
+            (0xc2, 0x9c) => return Some((i + 2, seq_start)),
+            _ => i += 1,
         }
-        if bytes[i] == 0x9c {
-            let end = i + 1;
-            return Some((end, bytes[start..end].to_vec()));
-        }
-        i += 1;
     }
     None
+}
+
+/// Whether a DCS string is a sixel image: `ESC P`, numeric parameters, then
+/// the final byte `q`.  Other DCS strings, such as tmux passthrough
+/// (`ESC Ptmux;`), DECRQSS (`ESC P $ q`) or XTGETTCAP (`ESC P + q`), are not.
+fn is_sixel(dcs: &[u8]) -> bool {
+    let params = dcs[2..]
+        .iter()
+        .take_while(|&&b| b.is_ascii_digit() || b == b';')
+        .count();
+    dcs.get(2 + params) == Some(&b'q')
 }
 
 /// Find the end of a kitty graphics sequence starting at `start`.
@@ -1159,7 +1185,7 @@ fn has_incomplete_sequence(line: &str) -> bool {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == 0x1b && i + 1 < bytes.len() {
-            if bytes[i + 1] == b'P' && find_sixel_end(bytes, i).is_none() {
+            if bytes[i + 1] == b'P' && find_dcs_end(bytes, i).is_none() {
                 return true;
             }
             if bytes[i + 1] == b'_' && find_kitty_end(bytes, i).is_none() {
@@ -1499,6 +1525,59 @@ mod tests {
         );
 
         assert_binary_snapshot("autobahn-clip-last-row.sixel", &clipped);
+    }
+
+    /// A sixel opened twice (`ESC P q ESC P q "…`) and closed twice must be
+    /// measured like the plain one: the first DCS is aborted by the second.
+    #[test]
+    fn sixel_doubled_introducer() {
+        let input = load_sixel_fixture();
+        let doubled =
+            input
+                .replacen("\x1bPq", "\x1bPq\x1bPq", 1)
+                .replacen("\x1b\\", "\x1b\\\x1b\\", 1);
+        let (lines, images) = process_input(&input, CELL_W, CELL_H);
+        let (doubled_lines, doubled_images) = process_input(&doubled, CELL_W, CELL_H);
+
+        assert_eq!(doubled_images.len(), 1);
+        let (img, doubled_img) = (&images[0], &doubled_images[0]);
+        assert_eq!(doubled_img.data, img.data);
+        assert_eq!(doubled_img.col, img.col);
+        assert_eq!(doubled_img.width_cols, img.width_cols);
+        assert_eq!(doubled_img.height_rows, img.height_rows);
+        assert_eq!(doubled_img.sixel_row_count, img.sixel_row_count);
+        assert_eq!(doubled_lines.len(), lines.len());
+    }
+
+    /// DCS strings that are not sixel are no images: they stay in the line,
+    /// for the ANSI parser to skip.
+    #[test]
+    fn non_sixel_dcs_is_not_an_image() {
+        let strings = [
+            "\x1bP$qm\x1b\\",                       // DECRQSS
+            "\x1bP+q544e\x1b\\",                    // XTGETTCAP
+            "\x1bPtmux;\x1b\x1b]0;title\x07\x1b\\", // tmux passthrough
+        ];
+        for dcs in strings {
+            let input = format!("before {dcs} after");
+            let (lines, images) = process_input(&input, CELL_W, CELL_H);
+            assert!(images.is_empty(), "{dcs:?} taken for an image");
+            assert_eq!(lines, [input]);
+        }
+    }
+
+    /// Only the UTF-8 encoding of C1 ST ends a DCS string, not a 0x9c byte
+    /// inside some other character.
+    #[test]
+    fn dcs_terminators() {
+        let (_, images) = process_input("\x1bPq#0~-~\u{9c}", CELL_W, CELL_H);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].sixel_row_count, 2);
+
+        // '✓' is E2 9C 93: no terminator here, so no image (and no panic).
+        let (lines, images) = process_input("text \x1bPq#0 ✓ after", CELL_W, CELL_H);
+        assert!(images.is_empty());
+        assert_eq!(lines, ["text \x1bPq#0 ✓ after"]);
     }
 
     #[test]

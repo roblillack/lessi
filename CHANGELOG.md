@@ -22,6 +22,21 @@ While pre-1.0, the minor version is bumped for breaking changes.
   per OS, so they now also open on the BSDs, illumos and other Unix-likes, where
   nothing happened before; under WSL in the Windows default browser; and on Linux
   systems without `xdg-open`, falling back to `gio`, `gnome-open` or `kde-open`.
+- **Sixel images opened twice** — a sixel sequence that starts with a repeated
+  introducer (`ESC P q ESC P q …`), as some tools emit, was measured as a single
+  cell: no space was reserved for it and it was never clipped, so near the bottom
+  of the screen it was drawn over the status line and scrolled the terminal. The
+  first, aborted introducer is now dropped, as terminals do.
+- **DCS strings that aren't images** — every `ESC P …` string was taken for a
+  sixel image, so terminal queries (DECRQSS `ESC P $ q`, XTGETTCAP `ESC P + q`)
+  or tmux passthrough (`ESC Ptmux;`) in the text took up a blank cell and were
+  sent to the terminal on every redraw. Only `ESC P` with numeric parameters and
+  `q` counts as sixel now; other DCS strings are hidden in the pager and passed
+  through unchanged when not paging.
+- **Crash on an unterminated `ESC P`** — a lone `0x9c` byte was read as the C1
+  string terminator, but in UTF-8 it is part of characters such as `✓`, so
+  `ESC P` followed later on the line by a `✓` crashed lessi. Only the UTF-8
+  encoding of U+009C ends a DCS string now.
 
 ## [0.2.2] - 2026-04-16
 
