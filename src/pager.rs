@@ -1976,37 +1976,6 @@ pub fn parse_content_to_lines(content: &[String]) -> Vec<ParsedLine> {
     content.iter().map(|s| ParsedLine::from_ansi(s)).collect()
 }
 
-/// Open a URL using the platform's default handler.
-fn open_url(url: &str) {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(url)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("open")
-            .arg(url)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-    #[cfg(target_os = "windows")]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-    }
-}
-
 /// Run the interactive pager with the given content and images.
 pub fn run_pager(
     content: Vec<ParsedLine>,
@@ -2045,7 +2014,7 @@ pub fn run_pager(
         }
 
         if let Some(target) = pending_link.take() {
-            open_url(&target);
+            let _ = open::that_detached(&target);
             continue;
         }
 

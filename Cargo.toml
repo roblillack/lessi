@@ -35,6 +35,7 @@ clap = { version = "4.4", features = ["derive"] }
 base64 = "0.22"
 flate2 = "1"
 png = "0.17"
+open = "5"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

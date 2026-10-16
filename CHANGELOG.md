@@ -10,6 +10,19 @@ While pre-1.0, the minor version is bumped for breaking changes.
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- **Opening links on Windows** — a link's URL is no longer handed to
+  `cmd /C start`, which read `&`, `|` and `^` in it as shell syntax:
+  `https://example.com/?a=1&b=2` was cut off at the `&` and the rest ran as a
+  command of its own, so a crafted link in the paged text could run arbitrary
+  commands when opened. URLs now reach the default handler unaltered.
+- **Opening links on more platforms** — links are opened through the
+  [`open`](https://crates.io/crates/open) crate instead of a hard-coded launcher
+  per OS, so they now also open on the BSDs, illumos and other Unix-likes, where
+  nothing happened before; under WSL in the Windows default browser; and on Linux
+  systems without `xdg-open`, falling back to `gio`, `gnome-open` or `kde-open`.
+
 ## [0.2.2] - 2026-04-16
 
 ### Fixed
