@@ -10,6 +10,14 @@ While pre-1.0, the minor version is bumped for breaking changes.
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- **Synchronized output** — screen updates are marked as synchronized updates
+  (mode 2026), so terminals that support them, such as kitty, WezTerm, foot,
+  Ghostty or recent Windows Terminal versions, show each update only once it is
+  complete, without flicker. They are not used inside tmux while sixel images
+  are shown, as tmux then sends every image twice.
+
 ### Fixed
 
 - **Opening links on Windows** — a link's URL is no longer handed to
@@ -42,11 +50,6 @@ While pre-1.0, the minor version is bumped for breaking changes.
   terminal could show it half-drawn: images blanked out until their data
   arrived, the scrollbar wiped until it was drawn again at the end. Every update
   is now sent in a single write.
-- **Flicker on terminals with synchronized output** — screen updates are now
-  marked as synchronized updates (mode 2026), so terminals that support them,
-  such as kitty, WezTerm, foot, Ghostty or recent Windows Terminal versions,
-  show each update only once it is complete. They are not used inside tmux while
-  sixel images are shown, as tmux then sends every image twice.
 - **Scrolling on after a key is released** — when a held key or the scroll
   wheel produced events faster than the terminal could draw, typically with
   large images on screen, each event was drawn in turn, so the screen kept
