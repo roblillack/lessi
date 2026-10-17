@@ -10,6 +10,8 @@ While pre-1.0, the minor version is bumped for breaking changes.
 
 ## [Unreleased] - ReleaseDate
 
+## [0.3.0] - 2026-10-17
+
 ### Added
 
 - **Synchronized output** — screen updates are marked as synchronized updates
@@ -116,7 +118,8 @@ While pre-1.0, the minor version is bumped for breaking changes.
   drawn at their position as you scroll, including multi-chunk Kitty transfers.
 
 <!-- next-url -->
-[Unreleased]: https://github.com/roblillack/lessi/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/roblillack/lessi/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/roblillack/lessi/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/roblillack/lessi/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/roblillack/lessi/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/roblillack/lessi/compare/v0.1.0...v0.2.0
