@@ -10,6 +10,14 @@ While pre-1.0, the minor version is bumped for breaking changes.
 
 ## [Unreleased] - ReleaseDate
 
+### Added
+
+- **Synchronized output** — screen updates are marked as synchronized updates
+  (mode 2026), so terminals that support them, such as kitty, WezTerm, foot,
+  Ghostty or recent Windows Terminal versions, show each update only once it is
+  complete, without flicker. They are not used inside tmux while sixel images
+  are shown, as tmux then sends every image twice.
+
 ### Fixed
 
 - **Opening links on Windows** — a link's URL is no longer handed to
@@ -37,6 +45,22 @@ While pre-1.0, the minor version is bumped for breaking changes.
   string terminator, but in UTF-8 it is part of characters such as `✓`, so
   `ESC P` followed later on the line by a `✓` crashed lessi. Only the UTF-8
   encoding of U+009C ends a DCS string now.
+- **Flicker while scrolling** — each screen update reached the terminal in
+  dozens of small writes (1 KiB each, plus a separate one per image), so the
+  terminal could show it half-drawn: images blanked out until their data
+  arrived, the scrollbar wiped until it was drawn again at the end. Every update
+  is now sent in a single write.
+- **Scrolling on after a key is released** — when a held key or the scroll
+  wheel produced events faster than the terminal could draw, typically with
+  large images on screen, each event was drawn in turn, so the screen kept
+  scrolling for seconds after the key was released. All pending input is now
+  handled before the screen is updated.
+
+### Changed
+
+- **Less output for colourful text** — colours and text attributes are only
+  sent to the terminal when they change, not again for every run of text, which
+  cuts the size of a screen update of coloured text by up to 80%.
 
 ## [0.2.2] - 2026-04-16
 
