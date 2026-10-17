@@ -18,6 +18,14 @@ While pre-1.0, the minor version is bumped for breaking changes.
   complete, without flicker. They are not used inside tmux while sixel images
   are shown, as tmux then sends every image twice.
 
+### Changed
+
+- **Large sixel split in bands inside tmux** — tmux discards escape sequences
+  longer than its `input-buffer-size` (1 MiB by default), so a sixel image
+  larger than that disappeared as soon as it was scrolled fully into view and
+  sent whole instead of clipped. Inside tmux, such images are now sent in
+  horizontal bands that each stay below the limit.
+
 ### Fixed
 
 - **Opening links on Windows** — a link's URL is no longer handed to

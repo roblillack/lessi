@@ -1,5 +1,7 @@
 //! Image protocol detection, parsing, and storage for sixel and kitty graphics.
 
+use std::ops::Range;
+
 /// An inline image extracted from the input stream.
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -515,6 +517,82 @@ pub fn clip_sixel(
         return Some(img.data.clone());
     }
 
+    let rows = clipped_sixel_rows(img, skip_top, visible_rows, cell_h)?;
+    build_sixel(img, rows, visible_rows * cell_h)
+}
+
+/// Like `clip_sixel`, but splits the result into horizontal bands of at most
+/// `max_bytes` each when it is larger than that.  tmux discards escape
+/// sequences longer than its `input-buffer-size` (1 MiB by default), so a
+/// large image sent as a whole would not show up at all.
+///
+/// Returns each band with the terminal row it goes to, counted from the row
+/// the whole clipped image would start at.
+pub fn clip_sixel_bands(
+    img: &InlineImage,
+    skip_top: usize,
+    keep_rows: usize,
+    cell_h: usize,
+    max_bytes: usize,
+) -> Vec<(usize, Vec<u8>)> {
+    let Some(data) = clip_sixel(img, skip_top, keep_rows, cell_h) else {
+        return Vec::new();
+    };
+    if data.len() <= max_bytes {
+        return vec![(0, data)];
+    }
+    let visible_rows = keep_rows.min(img.height_rows - skip_top);
+    let Some(rows) = clipped_sixel_rows(img, skip_top, visible_rows, cell_h) else {
+        return Vec::new();
+    };
+    let row_bytes = |rows: Range<usize>| sixel_rows_bytes(img, &rows).map_or(0, |b| b.len());
+    // Header, palette and terminator, which every band repeats.  No band is
+    // taller than the whole, so its header is no longer.
+    let header = &img.data[..img.sixel_data_start];
+    let header_len = adjust_sixel_raster_height(header, visible_rows * cell_h).len();
+    let palette_len: usize = img.sixel_color_defs.iter().map(|d| d.len()).sum();
+    let overhead = header_len + palette_len + 2;
+
+    // Bands must start on a terminal row boundary to line up with each other.
+    // `step` sixel rows (6 pixels each) are the fewest that fill whole rows.
+    let step = (1..=cell_h).find(|n| n * 6 % cell_h == 0).unwrap_or(1);
+    let mut bands = Vec::new();
+    let mut start = rows.start;
+    while start < rows.end {
+        // Grow the band as long as it fits.  A single step is sent even if it
+        // doesn't: it can't be split any further.
+        let mut end = (start + step).min(rows.end);
+        while end < rows.end {
+            let next = (end + step).min(rows.end);
+            if overhead + row_bytes(start..next) > max_bytes {
+                break;
+            }
+            end = next;
+        }
+        let row = (start - rows.start) * 6 / cell_h;
+        // The last band also covers the rest of its last terminal row, as the
+        // unsplit image does.
+        let pixel_h = if end == rows.end {
+            (visible_rows - row) * cell_h
+        } else {
+            (end - start) * 6
+        };
+        if let Some(band) = build_sixel(img, start..end, pixel_h) {
+            bands.push((row, band));
+        }
+        start = end;
+    }
+    bands
+}
+
+/// The sixel rows that show terminal rows `skip_top .. skip_top + visible_rows`
+/// of an image.
+fn clipped_sixel_rows(
+    img: &InlineImage,
+    skip_top: usize,
+    visible_rows: usize,
+    cell_h: usize,
+) -> Option<Range<usize>> {
     // --- Convert terminal rows → sixel rows --------------------------------
     // Each terminal row = cell_h pixels, each sixel row = 6 pixels.
     //
@@ -535,40 +613,51 @@ pub fn clip_sixel(
         return None;
     }
 
-    // --- Determine byte range of the rows we want to keep ------------------
-    // Start: right after the '-' that ends (skip_sixel_top - 1), or data_start.
-    let data_start = if skip_sixel_top == 0 {
+    Some(skip_sixel_top..end_sixel_row)
+}
+
+/// The bytes of `img.data` holding sixel rows `rows`, without the '-' that
+/// ends the last of them.
+fn sixel_rows_bytes(img: &InlineImage, rows: &Range<usize>) -> Option<Range<usize>> {
+    // Start: right after the '-' that ends (rows.start - 1), or data_start.
+    let data_start = if rows.start == 0 {
         img.sixel_data_start
-    } else if skip_sixel_top <= img.sixel_row_offsets.len() {
-        img.sixel_row_offsets[skip_sixel_top - 1] + 1
+    } else if rows.start <= img.sixel_row_offsets.len() {
+        img.sixel_row_offsets[rows.start - 1] + 1
     } else {
         return None;
     };
 
-    // End: at the '-' that ends (end_sixel_row - 1), or before ST.
+    // End: at the '-' that ends (rows.end - 1), or before ST.
     let st_start = find_st_position(&img.data)?;
-    let data_end = if end_sixel_row >= img.sixel_row_count {
+    let data_end = if rows.end >= img.sixel_row_count {
         // Keep through the last row (up to ST)
         st_start
-    } else if end_sixel_row <= img.sixel_row_offsets.len() {
-        // Include up to (but not including) the '-' that ends row end_sixel_row-1,
+    } else if rows.end <= img.sixel_row_offsets.len() {
+        // Include up to (but not including) the '-' that ends row rows.end-1,
         // but we actually want to include that row's data.  The offset points at the
         // '-' itself; we want everything up to and including the data before it.
-        img.sixel_row_offsets[end_sixel_row - 1]
+        img.sixel_row_offsets[rows.end - 1]
     } else {
         st_start
     };
 
-    if data_start >= data_end {
+    Some(data_start..data_end)
+}
+
+/// Build a sixel sequence of only the sixel rows `rows` of an image, with its
+/// raster height set to `pixel_h`.  Returns `None` if those rows are empty.
+fn build_sixel(img: &InlineImage, rows: Range<usize>, pixel_h: usize) -> Option<Vec<u8>> {
+    let bytes = sixel_rows_bytes(img, &rows)?;
+    if bytes.is_empty() {
         return None;
     }
 
-    let kept_data = &img.data[data_start..data_end];
+    let kept_data = &img.data[bytes];
 
     // --- Rebuild the sequence -----------------------------------------------
     let header = &img.data[..img.sixel_data_start];
-    let new_pixel_h = visible_rows * cell_h;
-    let adjusted_header = adjust_sixel_raster_height(header, new_pixel_h);
+    let adjusted_header = adjust_sixel_raster_height(header, pixel_h);
 
     let color_defs_size: usize = img.sixel_color_defs.iter().map(|d| d.len()).sum();
     let mut result =
@@ -1604,6 +1693,50 @@ mod tests {
 
         let result = clip_sixel(img, 0, 0, CELL_H);
         assert!(result.is_none(), "should return None with keep_rows=0");
+    }
+
+    /// Too large to send in one piece, an image comes in bands that each fit,
+    /// stack without gaps and together hold the rows of the unsplit image.
+    #[test]
+    fn sixel_bands() {
+        let input = load_sixel_fixture();
+        let (_, images) = process_input(&input, CELL_W, CELL_H);
+        let img = &images[0];
+        let palette_len: usize = img.sixel_color_defs.iter().map(|d| d.len()).sum();
+
+        // The whole image (sent unchanged when it fits), the top clipped off
+        // in the middle of a sixel row, and the bottom clipped off.
+        let h = img.height_rows;
+        for (skip_top, keep_rows) in [(0, h), (1, h), (0, h - 5)] {
+            let whole = clip_sixel(img, skip_top, keep_rows, CELL_H).unwrap();
+            let unsplit = clip_sixel_bands(img, skip_top, keep_rows, CELL_H, whole.len());
+            assert_eq!(unsplit, [(0, whole.clone())]);
+
+            let visible_rows = keep_rows.min(h - skip_top);
+            let rows = clipped_sixel_rows(img, skip_top, visible_rows, CELL_H).unwrap();
+            let expected = &img.data[sixel_rows_bytes(img, &rows).unwrap()];
+
+            for max_bytes in (whole.len() / 6..whole.len()).step_by(15013) {
+                let bands = clip_sixel_bands(img, skip_top, keep_rows, CELL_H, max_bytes);
+                assert!(bands.len() >= 2, "{} bands", bands.len());
+
+                let mut next_row = 0;
+                let mut band_rows: Vec<&[u8]> = Vec::new();
+                for (row, band) in &bands {
+                    assert!(
+                        band.len() <= max_bytes,
+                        "{} bytes > {max_bytes}",
+                        band.len()
+                    );
+                    assert_eq!(*row, next_row, "gap or overlap between bands");
+                    let info = analyze_sixel(band, CELL_W, CELL_H);
+                    next_row += info.height_rows;
+                    band_rows.push(&band[info.sixel_data_start + palette_len..band.len() - 2]);
+                }
+                assert_eq!(next_row, visible_rows);
+                assert_eq!(band_rows.join(&b'-'), expected);
+            }
+        }
     }
 
     #[test]
