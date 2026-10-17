@@ -20,8 +20,12 @@ use std::time::Duration;
 use unicode_width::UnicodeWidthChar;
 
 use crate::image::{
-    clip_kitty, clip_sixel, find_dcs_end, visible_images, ImageProtocol, InlineImage,
+    clip_kitty, clip_sixel_bands, find_dcs_end, visible_images, ImageProtocol, InlineImage,
 };
+
+/// Largest sixel sequence to send inside tmux, a little below the 1 MiB
+/// default of its `input-buffer-size`: tmux discards longer sequences.
+const TMUX_MAX_SIXEL_BYTES: usize = 1_000_000;
 
 // ---------------------------------------------------------------------------
 // ANSI parsing types
@@ -314,6 +318,7 @@ struct PagerState {
     filename: Option<String>,
     cell_h: usize,
     synchronized_updates: bool,
+    max_sixel_bytes: usize,
 }
 
 impl PagerState {
@@ -333,6 +338,7 @@ impl PagerState {
             filename: None,
             cell_h: 16,
             synchronized_updates: false,
+            max_sixel_bytes: usize::MAX,
         }
     }
 
@@ -1439,6 +1445,7 @@ fn render_pager(
         state.scroll_offset,
         state.viewport_height,
         state.cell_h,
+        state.max_sixel_bytes,
     )?;
 
     if state.synchronized_updates {
@@ -1455,6 +1462,7 @@ fn render_images(
     scroll_offset: usize,
     viewport_height: usize,
     cell_h: usize,
+    max_sixel_bytes: usize,
 ) -> io::Result<()> {
     let vis = visible_images(images, scroll_offset, viewport_height);
     for img in vis {
@@ -1473,9 +1481,11 @@ fn render_images(
                 // Always go through clip_sixel so the raster height is
                 // clamped to the visible area.  When no actual clipping is
                 // needed the fast-path inside clip_sixel returns the
-                // original data unchanged.
-                if let Some(data) = clip_sixel(img, skip_top, available, cell_h) {
-                    queue!(out, MoveTo(img.col as u16, viewport_row as u16))?;
+                // original data unchanged.  Images too large to send in one
+                // piece come back in bands, one below the other.
+                let bands = clip_sixel_bands(img, skip_top, available, cell_h, max_sixel_bytes);
+                for (row, data) in bands {
+                    queue!(out, MoveTo(img.col as u16, (viewport_row + row) as u16))?;
                     out.extend_from_slice(&data);
                 }
             }
@@ -2078,8 +2088,12 @@ pub fn run_pager(
     // (checked with 3.7-dev) forwards sixel images while an update is pending
     // and redraws the pane, images included, when it ends: images are sent
     // twice and the frame still arrives in pieces, so skip them there.
+    let in_tmux = std::env::var_os("TMUX").is_some();
     let has_sixel = images.iter().any(|i| i.protocol == ImageProtocol::Sixel);
-    state.synchronized_updates = std::env::var_os("TMUX").is_none() || !has_sixel;
+    state.synchronized_updates = !in_tmux || !has_sixel;
+    if in_tmux {
+        state.max_sixel_bytes = TMUX_MAX_SIXEL_BYTES;
+    }
     state.rebuild_links(&content);
 
     let mut result = Ok(());
