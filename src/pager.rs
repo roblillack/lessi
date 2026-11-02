@@ -1,8 +1,8 @@
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
-        MouseButton, MouseEvent, MouseEventKind,
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     },
     execute, queue,
     style::{
@@ -2007,6 +2007,11 @@ fn handle_event(
     link_to_open: &mut Option<String>,
 ) -> bool {
     match event {
+        // Windows also reports key releases; only presses and repeats count.
+        Event::Key(KeyEvent {
+            kind: KeyEventKind::Release,
+            ..
+        }) => {}
         Event::Key(key_event) => {
             let mut key_redraw = false;
             if !handle_key_event(key_event, state, content, &mut key_redraw, link_to_open) {
