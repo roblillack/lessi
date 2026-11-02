@@ -10,6 +10,11 @@ While pre-1.0, the minor version is bumped for breaking changes.
 
 ## [Unreleased] - ReleaseDate
 
+### Fixed
+
+- **Doubled keypresses on Windows** — key releases are no longer handled as
+  additional keypresses.
+
 ## [0.3.0] - 2026-10-17
 
 ### Added
